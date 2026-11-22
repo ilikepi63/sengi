@@ -1,0 +1,559 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>__TITLE__</title>
+<style>
+/* Layout: a single reading column; header summary, then a 2-up row of
+   heatmap + map, then full-width breakdown, growth and the input table. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --node: #e1e0d9;
+  --node-ink: #0b0b0b;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --node: #2c2c2a;
+    --node-ink: #ffffff;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --node: #2c2c2a;
+  --node-ink: #ffffff;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.5 var(--font);
+}
+main {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-inline: 16px;
+  padding-block: 24px 48px;
+  display: grid;
+  gap: 20px;
+}
+header { display: grid; gap: 8px; }
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  font-family: var(--mono);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.eyebrow {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.facts b { color: var(--ink); font-weight: 600; }
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 20px;
+}
+section {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--ring);
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.note { margin: 0; color: var(--ink-2); max-width: 70ch; }
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.swatch.square { border-radius: 2px; }
+.ramp {
+  display: inline-block;
+  width: 120px;
+  height: 10px;
+  border-radius: 2px;
+  margin: 0 6px;
+  vertical-align: -1px;
+  background: linear-gradient(90deg, #cde2fb, #86b6ef, #3987e5, #256abf, #0d366b);
+}
+.chart { position: relative; width: 100%; }
+canvas, svg { display: block; width: 100%; height: auto; }
+svg text { fill: var(--muted); font: 11px var(--font); font-variant-numeric: tabular-nums; }
+.empty { color: var(--muted); padding: 24px 0; }
+#tooltip {
+  position: fixed;
+  z-index: 10;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--ring);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+#tooltip .label { color: var(--ink-2); }
+#tooltip code { font-family: var(--mono); font-size: 11px; }
+details summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+details summary:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.table-wrap { overflow-x: auto; margin-top: 10px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+
+<main>
+  <header>
+    <p class="eyebrow">Corpus report</p>
+    <h1 id="signature"></h1>
+    <ul class="facts" id="facts"></ul>
+  </header>
+
+  <div class="row">
+    <section>
+      <h2>Distance between every pair</h2>
+      <p class="note">Each cell is the weighted mean distance between two inputs, in the order they were kept. Light cells away from the diagonal are near-duplicates.</p>
+      <div class="legend"><span>0 same</span><span class="ramp"></span><span>1 completely different</span></div>
+      <div class="chart" id="heatmap"></div>
+    </section>
+
+    <section>
+      <h2>Corpus map</h2>
+      <p class="note">Inputs placed so that the distance between dots approximates the distance between inputs. The axes have no units. An even spread means a well-spread corpus. Inputs that are equally far from everything else land on the same spot and overlap.</p>
+      <div class="legend">
+        <span><span class="swatch" style="background: var(--series-1)"></span>Kept for new categories</span>
+        <span><span class="swatch" style="background: var(--series-2)"></span>Kept for distance</span>
+      </div>
+      <div class="chart" id="map"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>What makes inputs different</h2>
+    <p class="note">Share of all differences between all pairs of inputs, broken down by input, then leaf, then parameter. A distance parameter counts its weight × distance; a category counts its weight whenever two inputs fall in different categories.</p>
+    <div class="legend">
+      <span><span class="swatch square" style="background: var(--series-1)"></span>Distance parameter</span>
+      <span><span class="swatch square" style="background: var(--series-2)"></span>Category parameter</span>
+    </div>
+    <div class="chart" id="breakdown"></div>
+  </section>
+
+  <section>
+    <h2>Growth</h2>
+    <p class="note">Corpus size against candidates generated. A long flat tail means new candidates stopped adding anything.</p>
+    <div class="chart" id="growth"></div>
+  </section>
+
+  <section>
+    <details>
+      <summary>All inputs</summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Kept for</th><th>At attempt</th><th>Value</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+</main>
+<div id="tooltip" hidden></div>
+
+<script>
+const DATA = "__REPORT_DATA__";
+
+const SVG = "http://www.w3.org/2000/svg";
+const tooltip = document.getElementById("tooltip");
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function el(name, attributes, parent) {
+  const node = document.createElementNS(SVG, name);
+  for (const key in attributes) node.setAttribute(key, attributes[key]);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function short(value, limit) {
+  const text = JSON.stringify(value);
+  return text.length > limit ? text.slice(0, limit) + "…" : text;
+}
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function showTooltip(event, html) {
+  tooltip.innerHTML = html;
+  tooltip.hidden = false;
+  const box = tooltip.getBoundingClientRect();
+  let x = event.clientX + 14;
+  let y = event.clientY + 14;
+  if (x + box.width > window.innerWidth - 8) x = event.clientX - box.width - 14;
+  if (y + box.height > window.innerHeight - 8) y = event.clientY - box.height - 14;
+  tooltip.style.left = Math.max(8, x) + "px";
+  tooltip.style.top = Math.max(8, y) + "px";
+}
+
+function hideTooltip() {
+  tooltip.hidden = true;
+}
+
+function inputHtml(index) {
+  const input = DATA.inputs[index];
+  return `<div><b>#${index + 1}</b> <span class="label">kept for ${input.kept_for}, attempt ${input.accepted_at}</span></div>` +
+    `<code>${escapeHtml(short(input.value, 240))}</code>`;
+}
+
+// ------------------------------------------------------------ header
+
+function renderHeader() {
+  const params = DATA.params.map(p => `${p.name}: ${p.type}`).join(", ");
+  document.getElementById("signature").textContent = `${DATA.function}(${params})`;
+
+  const s = DATA.stats;
+  const facts = [
+    ["inputs", s.size],
+    ["attempts", s.attempts],
+    ["accepted", (s.acceptance_rate * 100).toFixed(1) + "%"],
+    ["for categories", s.kept_for_categories],
+    ["for distance", s.kept_for_distance],
+    ["θ", DATA.theta],
+    ["seed", DATA.seed],
+    ["stopped", DATA.stop_reason],
+  ];
+  document.getElementById("facts").innerHTML =
+    facts.map(([label, value]) => `<li>${label} <b>${escapeHtml(String(value))}</b></li>`).join("");
+}
+
+// ------------------------------------------------------------ heatmap
+
+// Sequential blue ramp, light (0) to dark (1).
+const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
+  "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
+
+function rampColor(t) {
+  const clamped = Math.min(1, Math.max(0, t));
+  return RAMP[Math.round(clamped * (RAMP.length - 1))];
+}
+
+function renderHeatmap() {
+  const host = document.getElementById("heatmap");
+  host.innerHTML = "";
+  const n = DATA.inputs.length;
+  if (n < 2) {
+    host.innerHTML = `<p class="empty">Needs at least two inputs.</p>`;
+    return;
+  }
+  const size = Math.min(host.clientWidth, 480);
+  const ratio = window.devicePixelRatio || 1;
+  const canvas = document.createElement("canvas");
+  canvas.width = size * ratio;
+  canvas.height = size * ratio;
+  canvas.style.width = size + "px";
+  canvas.style.height = size + "px";
+  canvas.setAttribute("role", "img");
+  canvas.setAttribute("aria-label", `Heatmap of distances between ${n} inputs`);
+  host.appendChild(canvas);
+
+  const context = canvas.getContext("2d");
+  context.scale(ratio, ratio);
+  const cell = size / n;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      context.fillStyle = i === j ? css("--grid") : rampColor(DATA.distances[i][j]);
+      context.fillRect(j * cell, i * cell, Math.ceil(cell), Math.ceil(cell));
+    }
+  }
+
+  canvas.addEventListener("pointermove", event => {
+    const box = canvas.getBoundingClientRect();
+    const j = Math.floor((event.clientX - box.left) / cell);
+    const i = Math.floor((event.clientY - box.top) / cell);
+    if (i < 0 || j < 0 || i >= n || j >= n) return hideTooltip();
+    const distance = DATA.distances[i][j].toFixed(3);
+    showTooltip(event, `<div><b>#${i + 1} vs #${j + 1}</b>: distance ${distance}</div>` +
+      `<div><code>${escapeHtml(short(DATA.inputs[i].value, 120))}</code></div>` +
+      `<div><code>${escapeHtml(short(DATA.inputs[j].value, 120))}</code></div>`);
+  });
+  canvas.addEventListener("pointerleave", hideTooltip);
+}
+
+// ------------------------------------------------------------ map
+
+function renderMap() {
+  const host = document.getElementById("map");
+  host.innerHTML = "";
+  const n = DATA.inputs.length;
+  if (n < 2) {
+    host.innerHTML = `<p class="empty">Needs at least two inputs.</p>`;
+    return;
+  }
+  const size = 480;
+  const pad = 16;
+  const xs = DATA.inputs.map(p => p.x);
+  const ys = DATA.inputs.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  // One scale for both axes, so distances on screen stay proportional.
+  const span = Math.max(maxX - minX, maxY - minY) || 1;
+  const scale = (size - 2 * pad) / span;
+  const offsetX = pad + ((size - 2 * pad) - (maxX - minX) * scale) / 2;
+  const offsetY = pad + ((size - 2 * pad) - (maxY - minY) * scale) / 2;
+
+  const svg = el("svg", { viewBox: `0 0 ${size} ${size}`, role: "img",
+    "aria-label": `Map of ${n} inputs` }, host);
+  el("rect", { x: 0, y: 0, width: size, height: size, fill: "none",
+    stroke: css("--grid"), "stroke-width": 1 }, svg);
+
+  DATA.inputs.forEach((input, index) => {
+    const cx = offsetX + (input.x - minX) * scale;
+    const cy = offsetY + (input.y - minY) * scale;
+    const color = input.kept_for === "distance" ? css("--series-2") : css("--series-1");
+    const dot = el("circle", { cx, cy, r: 5, fill: color, stroke: css("--surface"),
+      "stroke-width": 2 }, svg);
+    // A larger invisible target than the dot itself.
+    const target = el("circle", { cx, cy, r: 10, fill: "transparent" }, svg);
+    target.addEventListener("pointermove", event => {
+      dot.setAttribute("r", 7);
+      showTooltip(event, inputHtml(index));
+    });
+    target.addEventListener("pointerleave", () => {
+      dot.setAttribute("r", 5);
+      hideTooltip();
+    });
+  });
+}
+
+// ------------------------------------------------------------ breakdown (icicle)
+
+function buildTree() {
+  const root = { name: "all", share: 0, children: new Map() };
+  for (const c of DATA.contributions) {
+    root.share += c.share;
+    if (!root.children.has(c.input)) root.children.set(c.input, { name: c.input, share: 0, children: new Map() });
+    const input = root.children.get(c.input);
+    input.share += c.share;
+    if (!input.children.has(c.leaf)) input.children.set(c.leaf, { name: c.leaf, share: 0, children: new Map() });
+    const leaf = input.children.get(c.leaf);
+    leaf.share += c.share;
+    leaf.children.set(c.parameter + "/" + c.kind, { name: c.parameter, kind: c.kind, share: c.share, children: new Map() });
+  }
+  return root;
+}
+
+function renderBreakdown() {
+  const host = document.getElementById("breakdown");
+  host.innerHTML = "";
+  if (DATA.contributions.length === 0) {
+    host.innerHTML = `<p class="empty">No differences to break down.</p>`;
+    return;
+  }
+  const width = 960;
+  const rowHeight = 34;
+  const gap = 2;
+  const labels = ["Input", "Leaf", "Parameter"];
+  const labelWidth = 76;
+  const height = 3 * rowHeight + 2 * gap;
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, role: "img",
+    "aria-label": "Breakdown of differences by input, leaf and parameter" }, host);
+  const usable = width - labelWidth;
+  const tree = buildTree();
+
+  labels.forEach((label, depth) => {
+    const text = el("text", { x: 0, y: depth * (rowHeight + gap) + rowHeight / 2 + 4 }, svg);
+    text.textContent = label;
+  });
+
+  function draw(node, depth, x, path) {
+    const children = [...node.children.values()].sort((a, b) => b.share - a.share);
+    let cursor = x;
+    for (const child of children) {
+      const w = (child.share / tree.share) * usable;
+      const y = depth * (rowHeight + gap);
+      const isParameter = depth === 2;
+      const fill = isParameter
+        ? (child.kind === "category" ? css("--series-2") : css("--series-1"))
+        : css("--node");
+      const rect = el("rect", { x: labelWidth + cursor + gap / 2, y, width: Math.max(0, w - gap),
+        height: rowHeight, rx: 3, fill }, svg);
+      const fullPath = path.concat(isParameter ? `${child.name} (${child.kind})` : child.name);
+      const percent = (child.share / tree.share * 100).toFixed(1) + "%";
+      if (w > 56) {
+        const label = el("text", { x: labelWidth + cursor + 8, y: y + rowHeight / 2 + 4 }, svg);
+        label.style.fill = isParameter ? "#ffffff" : css("--node-ink");
+        const maxChars = Math.floor((w - 16) / 6.5);
+        const name = child.name.length > maxChars ? child.name.slice(0, maxChars - 1) + "…" : child.name;
+        label.textContent = name;
+      }
+      rect.addEventListener("pointermove", event =>
+        showTooltip(event, `<div><b>${escapeHtml(fullPath.join(" › "))}</b></div><div>${percent} of all differences</div>`));
+      rect.addEventListener("pointerleave", hideTooltip);
+      if (!isParameter) draw(child, depth + 1, cursor, fullPath);
+      cursor += w;
+    }
+  }
+  draw(tree, 0, 0, []);
+}
+
+// ------------------------------------------------------------ growth
+
+function niceTicks(max, count) {
+  if (max <= 0) return [0];
+  const raw = max / count;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map(m => m * magnitude).find(s => s >= raw);
+  // Keep adding ticks until one reaches the maximum, so nothing is cut off.
+  const ticks = [0];
+  while (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+function renderGrowth() {
+  const host = document.getElementById("growth");
+  host.innerHTML = "";
+  const width = 960, height = 240;
+  const left = 44, right = 16, top = 12, bottom = 28;
+  const attempts = Math.max(1, DATA.stats.attempts);
+  const size = DATA.inputs.length;
+  const xTicks = niceTicks(attempts, 6);
+  const yTicks = niceTicks(Math.max(1, size), 4);
+  const xMax = Math.max(attempts, xTicks[xTicks.length - 1]);
+  const yMax = Math.max(1, yTicks[yTicks.length - 1]);
+  const x = v => left + (v / xMax) * (width - left - right);
+  const y = v => top + (1 - v / yMax) * (height - top - bottom);
+
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, role: "img",
+    "aria-label": `Corpus grew to ${size} inputs over ${attempts} attempts` }, host);
+  for (const t of yTicks) {
+    el("line", { x1: left, x2: width - right, y1: y(t), y2: y(t), stroke: css("--grid"), "stroke-width": 1 }, svg);
+    const label = el("text", { x: left - 8, y: y(t) + 4, "text-anchor": "end" }, svg);
+    label.textContent = t;
+  }
+  for (const t of xTicks) {
+    const label = el("text", { x: x(t), y: height - 8, "text-anchor": "middle" }, svg);
+    label.textContent = t.toLocaleString();
+  }
+  el("line", { x1: left, x2: width - right, y1: y(0), y2: y(0), stroke: css("--axis"), "stroke-width": 1 }, svg);
+
+  // A step line: size jumps by one at each accepted attempt.
+  let d = `M ${x(0)} ${y(0)}`;
+  DATA.inputs.forEach((input, index) => {
+    d += ` H ${x(input.accepted_at)} V ${y(index + 1)}`;
+  });
+  d += ` H ${x(attempts)}`;
+  el("path", { d, fill: "none", stroke: css("--series-1"), "stroke-width": 2,
+    "stroke-linejoin": "round" }, svg);
+  el("circle", { cx: x(attempts), cy: y(size), r: 4, fill: css("--series-1"),
+    stroke: css("--surface"), "stroke-width": 2 }, svg);
+
+  const crosshair = el("line", { y1: top, y2: height - bottom, stroke: css("--axis"),
+    "stroke-width": 1, visibility: "hidden" }, svg);
+  svg.addEventListener("pointermove", event => {
+    const box = svg.getBoundingClientRect();
+    const px = (event.clientX - box.left) / box.width * width;
+    if (px < left || px > width - right) { crosshair.setAttribute("visibility", "hidden"); return hideTooltip(); }
+    const attempt = Math.min(attempts, Math.max(0, Math.round((px - left) / (width - left - right) * xMax)));
+    const kept = DATA.inputs.filter(input => input.accepted_at <= attempt).length;
+    crosshair.setAttribute("x1", x(attempt));
+    crosshair.setAttribute("x2", x(attempt));
+    crosshair.setAttribute("visibility", "visible");
+    showTooltip(event, `<div>Attempt <b>${attempt.toLocaleString()}</b></div><div>${kept} inputs kept</div>`);
+  });
+  svg.addEventListener("pointerleave", () => { crosshair.setAttribute("visibility", "hidden"); hideTooltip(); });
+}
+
+// ------------------------------------------------------------ table
+
+function renderTable() {
+  document.getElementById("rows").innerHTML = DATA.inputs.map((input, index) =>
+    `<tr><td>${index + 1}</td><td>${input.kept_for}</td><td>${input.accepted_at}</td>` +
+    `<td><code>${escapeHtml(JSON.stringify(input.value))}</code></td></tr>`).join("");
+}
+
+function renderAll() {
+  renderHeatmap();
+  renderMap();
+  renderBreakdown();
+  renderGrowth();
+}
+
+renderHeader();
+renderTable();
+renderAll();
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderHeatmap, 150);
+});
+// Colors come from the theme tokens, so redraw when the theme changes.
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
+new MutationObserver(renderAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>

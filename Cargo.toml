@@ -1,0 +1,14 @@
+[package]
+name = "sengi"
+version = "0.1.0"
+edition = "2024"
+description = "Generator for testing inputs, maximizing user defined differences"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4.6.9", features = ["derive"] }
+prettyplease = "0.3.0"
+quote = "1.0.47"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
+syn = { version = "3.0.10", features = ["full", "visit"] }
