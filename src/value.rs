@@ -15,8 +15,8 @@
 //! Besides simple values there are two structural kinds of leaf, so that
 //! structural differences are measured too:
 //!
-//! - **choice** leaves record which enum variant, or `Some`/`None`, was
-//!   picked. The chosen variant's fields live below it
+//! - **choice** leaves record which enum variant, union member or literal,
+//!   or `Some`/`None`, was picked. The chosen variant's fields live below it
 //!   (`cfg.mode.Fast.0`).
 //! - **length** leaves record how many elements a list or map has
 //!   (`xs.len`); the elements are `xs[0]`, `xs[1]`, ...
@@ -31,18 +31,70 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::Primitive;
+use crate::shape::Simple;
 
 /// Which kind of leaf this is. It decides which parameters measure it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
-    /// A simple value: number, bool, char or string.
-    Primitive(Primitive),
-    /// Which enum variant was chosen, or `Some`/`None` for an `Option`.
+    /// A simple value — number, bool, char or string — with its range.
+    Simple(Simple),
+    /// Which enum variant, union member or literal was chosen, or
+    /// `Some`/`None` for an `Option`.
     Choice,
     /// How many elements a collection has.
     Length,
     /// A type handled by an override; the string is the override's name.
     Custom(String),
+}
+
+impl From<Primitive> for Kind {
+    fn from(primitive: Primitive) -> Kind {
+        Kind::Simple(primitive.into())
+    }
+}
+
+/// A kind without its range: every member of a family shares one parameter
+/// set. `u8` and `u64` are both [`Family::UInt`], measured relative to their
+/// own ranges.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// `bool`
+    Bool,
+    /// Unsigned integers.
+    UInt,
+    /// Signed integers.
+    Int,
+    /// Floats.
+    Float,
+    /// `char`
+    Char,
+    /// Strings.
+    Text,
+    /// [`Kind::Choice`]
+    Choice,
+    /// [`Kind::Length`]
+    Length,
+    /// An override, by name.
+    Custom(String),
+}
+
+impl Kind {
+    /// The family whose parameters measure this kind.
+    pub fn family(&self) -> Family {
+        match self {
+            Kind::Simple(simple) => match simple {
+                Simple::Bool => Family::Bool,
+                Simple::UInt { .. } => Family::UInt,
+                Simple::Int { .. } => Family::Int,
+                Simple::Float { .. } => Family::Float,
+                Simple::Char => Family::Char,
+                Simple::Text { .. } => Family::Text,
+            },
+            Kind::Choice => Family::Choice,
+            Kind::Length => Family::Length,
+            Kind::Custom(name) => Family::Custom(name.clone()),
+        }
+    }
 }
 
 /// A generated value at one leaf.

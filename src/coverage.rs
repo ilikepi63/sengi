@@ -37,7 +37,7 @@ pub fn categories(input: &Input, registry: &Registry) -> BTreeSet<Category> {
         let dimension_path = without_indices(path);
         for param in registry.categories(&leaf.kind) {
             let dimension = format!("{dimension_path} / {}", param.name);
-            let category = (param.category)(&leaf.value);
+            let category = (param.category)(&leaf.kind, &leaf.value);
             found.insert((dimension, category));
         }
     }
@@ -129,14 +129,14 @@ mod tests {
 
     fn flag(value: bool) -> InputLeaf {
         InputLeaf {
-            kind: Kind::Primitive(Primitive::Bool),
+            kind: Kind::from(Primitive::Bool),
             value: LeafValue::Bool(value),
         }
     }
 
     fn byte(value: u128) -> InputLeaf {
         InputLeaf {
-            kind: Kind::Primitive(Primitive::U8),
+            kind: Kind::from(Primitive::U8),
             value: LeafValue::UInt(value),
         }
     }

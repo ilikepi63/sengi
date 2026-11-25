@@ -1,47 +1,159 @@
-//! Step 1: turn a parsed type into a [`Shape`] — what the fuzzer needs to
-//! know to generate leaf values for it.
+//! Step 1: turn an input definition into a [`Shape`] — what the fuzzer needs
+//! to know to generate values for it.
 //!
-//! A [`TypeNode`] describes a type as written; a shape describes how to build
-//! a value of it:
+//! A shape is sengi's internal description of an input, cut down to what
+//! matters for building a value. Every front end produces one: the Rust
+//! parser (this module, from a [`TypeNode`]) and JSON Schema
+//! ([`crate::schema`]). Everything after this step — generation, parameters,
+//! distances, saving, analysis — only sees shapes.
 //!
-//! | Type | Shape |
-//! |---|---|
-//! | `u64`, `bool`, `char`, `&str`, `String`, ... | [`Shape::Simple`] |
-//! | struct, tuple, a function's parameter list | [`Shape::Fields`] |
-//! | enum | [`Shape::Enum`] |
-//! | `Option<T>` | [`Shape::Option`] |
-//! | `Vec<T>`, `[T]`, `VecDeque`, `HashSet`, ... | [`Shape::List`] |
-//! | `[T; N]` | [`Shape::Array`] |
-//! | `HashMap<K, V>`, `BTreeMap<K, V>` | [`Shape::Map`] |
-//! | `&T`, `Box<T>`, `Rc<T>`, `Arc<T>`, type aliases | the shape of `T` |
-//! | a type or path with an override | [`Shape::Custom`] (not broken down) |
-//! | generic `T`, `impl Trait` | [`Shape::Ignored`] |
-//! | external structs, recursive types, `dyn Trait`, ... | [`Shape::Unsupported`] |
+//! | Rust type | JSON Schema | Shape |
+//! |---|---|---|
+//! | `u64`, `bool`, `char`, `&str`, `String`, ... | `integer`, `number`, `boolean`, `string` | [`Shape::Simple`] |
+//! | struct, tuple, a function's parameter list | `object` with `properties`, `prefixItems` | [`Shape::Fields`] |
+//! | enum | – | [`Shape::Enum`] |
+//! | – | `oneOf` / `anyOf` | [`Shape::Union`] |
+//! | – | `enum` / `const` | [`Shape::Literal`] |
+//! | `Option<T>` | `anyOf: [T, null]`, `type: [T, "null"]` | [`Shape::Option`] |
+//! | – | a property that isn't `required` | [`Shape::Optional`] |
+//! | `Vec<T>`, `[T]`, `VecDeque`, `HashSet`, ... | `array` with `items` | [`Shape::List`] |
+//! | `[T; N]` | `array` with `minItems` = `maxItems` | [`Shape::Array`] |
+//! | `HashMap<K, V>`, `BTreeMap<K, V>` | `object` with `additionalProperties` | [`Shape::Map`] |
+//! | `&T`, `Box<T>`, `Rc<T>`, `Arc<T>`, type aliases | `$ref` | the shape of `T` |
+//! | a type or path with an override | `x-sengi-override` | [`Shape::Custom`] (not broken down) |
+//! | generic `T`, `impl Trait` | – | [`Shape::Ignored`] |
+//! | external structs, recursive types, `dyn Trait`, ... | recursive `$ref`, `pattern`, `format`, ... | [`Shape::Unsupported`] |
 //!
 //! Generics are ignored on purpose: there's no concrete type to generate.
 //! Unsupported parts are reported by [`Shape::unsupported`] and generate
 //! nothing, so the rest of the input is still fuzzed.
 
+use serde_json::Value;
+
 use crate::overrides::Overrides;
 use crate::{Function, Primitive, TypeDef, TypeNode};
+
+/// A simple value the fuzzer generates directly, with the range it must stay
+/// in. Rust's simple types are fixed ranges (`u8` is `UInt { min: 0, max:
+/// 255 }`); a JSON Schema can narrow them (`"minimum": 1, "maximum": 10`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Simple {
+    /// `true` or `false`.
+    Bool,
+    /// An unsigned integer.
+    UInt {
+        /// Smallest allowed value.
+        min: u128,
+        /// Largest allowed value.
+        max: u128,
+    },
+    /// A signed integer.
+    Int {
+        /// Smallest allowed value.
+        min: i128,
+        /// Largest allowed value.
+        max: i128,
+    },
+    /// A floating point number.
+    Float {
+        /// Smallest allowed value.
+        min: f64,
+        /// Largest allowed value.
+        max: f64,
+        /// `f32` rather than `f64`.
+        single: bool,
+        /// Whether NaN and ±∞ may be generated. Rust floats allow them;
+        /// JSON numbers can't hold them.
+        specials: bool,
+    },
+    /// A single Unicode character.
+    Char,
+    /// A string.
+    Text {
+        /// Fewest characters.
+        min_len: usize,
+        /// Most characters, if limited.
+        max_len: Option<usize>,
+    },
+}
+
+impl From<Primitive> for Simple {
+    fn from(primitive: Primitive) -> Simple {
+        fn uint(max: u128) -> Simple {
+            Simple::UInt { min: 0, max }
+        }
+        fn int(min: i128, max: i128) -> Simple {
+            Simple::Int { min, max }
+        }
+        match primitive {
+            Primitive::Bool => Simple::Bool,
+            Primitive::Char => Simple::Char,
+            Primitive::U8 => uint(u8::MAX as u128),
+            Primitive::U16 => uint(u16::MAX as u128),
+            Primitive::U32 => uint(u32::MAX as u128),
+            // `usize`/`isize` are treated as 64-bit.
+            Primitive::U64 | Primitive::Usize => uint(u64::MAX as u128),
+            Primitive::U128 => uint(u128::MAX),
+            Primitive::I8 => int(i8::MIN as i128, i8::MAX as i128),
+            Primitive::I16 => int(i16::MIN as i128, i16::MAX as i128),
+            Primitive::I32 => int(i32::MIN as i128, i32::MAX as i128),
+            Primitive::I64 | Primitive::Isize => int(i64::MIN as i128, i64::MAX as i128),
+            Primitive::I128 => int(i128::MIN, i128::MAX),
+            Primitive::F32 => Simple::Float {
+                min: -f32::MAX as f64,
+                max: f32::MAX as f64,
+                single: true,
+                specials: true,
+            },
+            Primitive::F64 => Simple::Float {
+                min: -f64::MAX,
+                max: f64::MAX,
+                single: false,
+                specials: true,
+            },
+            Primitive::Str | Primitive::String => Simple::Text {
+                min_len: 0,
+                max_len: None,
+            },
+        }
+    }
+}
+
+/// How many elements a list or map may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Len {
+    /// Fewest elements.
+    pub min: usize,
+    /// Most elements, if limited.
+    pub max: Option<usize>,
+}
 
 /// What the fuzzer generates for one type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
-    /// A simple type: a leaf the fuzzer generates directly.
-    Simple(Primitive),
-    /// Structs, tuples and a function's parameter list: every field is present.
+    /// A simple value: a leaf the fuzzer generates directly.
+    Simple(Simple),
+    /// Structs, tuples, objects and a function's parameter list: every field
+    /// is present (unless it is [`Shape::Optional`]).
     Fields(Vec<(String, Shape)>),
-    /// One variant is chosen, then that variant's fields are generated.
+    /// A Rust enum: one variant is chosen, then that variant's fields are
+    /// generated. Written in serde's externally tagged layout.
     Enum(Vec<(String, Vec<(String, Shape)>)>),
-    /// Either `None`, or `Some` with an inner value.
+    /// One of several shapes, each with a label (JSON Schema `oneOf` /
+    /// `anyOf`). The value is just the chosen shape's value, untagged.
+    Union(Vec<(String, Shape)>),
+    /// One of a fixed set of JSON values (JSON Schema `enum` / `const`).
+    Literal(Vec<Value>),
+    /// Either `None` (written as `null`), or `Some` with an inner value.
     Option(Box<Shape>),
-    /// A collection with a random length: `Vec`, slices, sets.
-    List(Box<Shape>),
+    /// An object property that may be left out entirely.
+    Optional(Box<Shape>),
+    /// A collection with a random length: `Vec`, slices, sets, arrays.
+    List(Box<Shape>, Len),
     /// A fixed-length array: `[T; N]`.
     Array(Box<Shape>, usize),
     /// A map with a random number of key/value pairs.
-    Map(Box<Shape>, Box<Shape>),
+    Map(Box<Shape>, Box<Shape>, Len),
     /// A type handled by an override (the string is the override's name).
     /// The fuzzer asks the override for a whole value; the type is not
     /// broken down any further.
@@ -50,6 +162,11 @@ pub enum Shape {
     Ignored,
     /// A type we can't generate yet, with a short description of why.
     Unsupported(String),
+}
+
+/// The choice label of a literal value: its JSON text, e.g. `"Off"` or `3`.
+pub fn literal_label(value: &Value) -> String {
+    value.to_string()
 }
 
 /// The shape of a whole function call: one field per parameter.
@@ -89,7 +206,7 @@ pub fn shape_of(node: &TypeNode, path: &str, overrides: &Overrides) -> Shape {
         TypeNode::Reference { inner, .. } => shape_of(inner, path, overrides),
         TypeNode::Slice(element) => {
             let element = shape_of(element, &format!("{path}[]"), overrides);
-            Shape::List(Box::new(element))
+            Shape::List(Box::new(element), Len::default())
         }
         TypeNode::Array { elem, len } => match len.parse::<usize>() {
             Ok(len) => {
@@ -124,7 +241,7 @@ fn shape_of_path(node: &TypeNode, path: &str, overrides: &Overrides) -> Shape {
     };
 
     if let Some(primitive) = node.primitive() {
-        return Shape::Simple(primitive);
+        return Shape::Simple(primitive.into());
     }
 
     match definition {
@@ -162,12 +279,12 @@ fn shape_of_path(node: &TypeNode, path: &str, overrides: &Overrides) -> Shape {
                 [inner],
             ) => {
                 let element = shape_of(inner, &format!("{path}[]"), overrides);
-                Shape::List(Box::new(element))
+                Shape::List(Box::new(element), Len::default())
             }
             ("HashMap" | "BTreeMap", [key, value]) => {
                 let key = shape_of(key, &format!("{path}[].key"), overrides);
                 let value = shape_of(value, &format!("{path}[].value"), overrides);
-                Shape::Map(Box::new(key), Box::new(value))
+                Shape::Map(Box::new(key), Box::new(value), Len::default())
             }
             ("Box" | "Rc" | "Arc", [inner]) => shape_of(inner, path, overrides),
             _ => Shape::Unsupported(node.to_string()),
@@ -270,7 +387,7 @@ impl Shape {
 fn collect_unsupported(shape: &Shape, found: &mut Vec<String>) {
     match shape {
         Shape::Unsupported(why) => found.push(why.clone()),
-        Shape::Fields(fields) => {
+        Shape::Fields(fields) | Shape::Union(fields) => {
             for (_, field) in fields {
                 collect_unsupported(field, found);
             }
@@ -282,14 +399,15 @@ fn collect_unsupported(shape: &Shape, found: &mut Vec<String>) {
                 }
             }
         }
-        Shape::Option(inner) | Shape::List(inner) | Shape::Array(inner, _) => {
-            collect_unsupported(inner, found)
-        }
-        Shape::Map(key, value) => {
+        Shape::Option(inner)
+        | Shape::Optional(inner)
+        | Shape::List(inner, _)
+        | Shape::Array(inner, _) => collect_unsupported(inner, found),
+        Shape::Map(key, value, _) => {
             collect_unsupported(key, found);
             collect_unsupported(value, found);
         }
-        Shape::Simple(_) | Shape::Custom(_) | Shape::Ignored => {}
+        Shape::Simple(_) | Shape::Literal(_) | Shape::Custom(_) | Shape::Ignored => {}
     }
 }
 
@@ -318,25 +436,25 @@ mod tests {
             ("Off".into(), vec![]),
             (
                 "Fast".into(),
-                vec![("0".into(), Shape::Simple(Primitive::U8))],
+                vec![("0".into(), Shape::Simple(Primitive::U8.into()))],
             ),
             (
                 "Custom".into(),
                 vec![
-                    ("level".into(), Shape::Simple(Primitive::I64)),
-                    ("label".into(), Shape::Simple(Primitive::Str)),
+                    ("level".into(), Shape::Simple(Primitive::I64.into())),
+                    ("label".into(), Shape::Simple(Primitive::Str.into())),
                 ],
             ),
         ]);
         let limits = Shape::Option(Box::new(Shape::Fields(vec![
-            ("0".into(), Shape::Simple(Primitive::U8)),
-            ("1".into(), Shape::Simple(Primitive::U16)),
+            ("0".into(), Shape::Simple(Primitive::U8.into())),
+            ("1".into(), Shape::Simple(Primitive::U16.into())),
         ])));
         assert_eq!(
             *cfg,
             Shape::Fields(vec![
-                ("name".into(), Shape::Simple(Primitive::String)),
-                ("retries".into(), Shape::Simple(Primitive::U32)),
+                ("name".into(), Shape::Simple(Primitive::String.into())),
+                ("retries".into(), Shape::Simple(Primitive::U32.into())),
                 ("mode".into(), mode),
                 ("limits".into(), limits),
             ])
@@ -352,14 +470,18 @@ mod tests {
         assert_eq!(
             params[0].1,
             Shape::Map(
-                Box::new(Shape::Simple(Primitive::String)),
-                Box::new(Shape::List(Box::new(Shape::Simple(Primitive::F64)))),
+                Box::new(Shape::Simple(Primitive::String.into())),
+                Box::new(Shape::List(
+                    Box::new(Shape::Simple(Primitive::F64.into())),
+                    Len::default()
+                )),
+                Len::default(),
             )
         );
         assert_eq!(params[1].1, Shape::Ignored); // impl Fn(u8) -> bool
         assert_eq!(
             params[2].1,
-            Shape::Array(Box::new(Shape::Simple(Primitive::Char)), 4)
+            Shape::Array(Box::new(Shape::Simple(Primitive::Char.into())), 4)
         );
     }
 

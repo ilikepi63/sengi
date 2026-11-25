@@ -1,20 +1,26 @@
-//! Generate a corpus of maximally different inputs for Rust functions.
+//! Generate maximally different test inputs — for Rust functions or
+//! anything described by a JSON Schema — and analyse sets of inputs you
+//! already have.
 //!
-//! The crate reads Rust source, finds every function, works out what each
-//! input is made of, and fuzzes inputs — keeping only the ones that are
-//! meaningfully different from everything kept so far. The kept inputs are
-//! the *corpus*. What a test does with them (assertions, snapshots, ...) is
-//! left entirely to the user: this crate only produces inputs.
+//! sengi works out what an input is made of, fuzzes inputs, and keeps only
+//! the ones that are meaningfully different from everything kept so far. The
+//! kept inputs are the *corpus*. What a test does with them (assertions,
+//! snapshots, ...) is left entirely to the user: this crate only produces and
+//! measures inputs.
 //!
 //! # Pipeline
 //!
 //! One module per step:
 //!
-//! 0. **Parse** ([`function_inputs`], `types`, `resolve`): find every function
-//!    and build the full [`TypeNode`] tree of each input — structs and enums
-//!    defined in the file are expanded, generics are substituted.
-//! 1. **Shape** ([`shape`]): reduce each type to what the fuzzer must know —
-//!    simple types, fields, choices (enum variants, `Option`) and collections.
+//! 0. **Front ends** turn an input definition into a [`shape::Shape`]:
+//!    - Rust source ([`function_inputs`], `types`, `resolve`, then
+//!      [`shape::function_shape`]): find every function and build the full
+//!      [`TypeNode`] tree of each input — structs and enums defined in the
+//!      file are expanded, generics are substituted;
+//!    - JSON Schema ([`schema`]), which needs no source code at all.
+//! 1. **Shape** ([`shape`]): what the fuzzer must know — simple values with
+//!    their ranges, fields, choices (enum variants, unions, literals,
+//!    `Option`) and collections. Everything below only sees shapes.
 //! 2. **Parameters** ([`params`]): every simple type has a fixed set of
 //!    parameters (a string has a length, its bytes, its character classes;
 //!    an integer has a magnitude, its bits, its boundary class, ...). Each
@@ -35,7 +41,8 @@
 //! a single leaf and isn't broken down further.
 //!
 //! [`value`] describes generated inputs, [`stats`] summarises a corpus,
-//! [`save`] writes it to JSON and [`report`] draws it as an HTML page.
+//! [`save`] writes it to JSON (and reads inputs back), [`analysis`] measures
+//! any set of inputs and [`report`] draws either as an HTML page.
 //!
 //! # Key design decisions
 //!
@@ -61,23 +68,31 @@
 //! use sengi::corpus::{CorpusConfig, build_corpus};
 //! use sengi::overrides::Overrides;
 //! use sengi::registry::Registry;
+//! use sengi::schema::shape_from_schema;
 //! use sengi::shape::function_shape;
 //!
-//! let src = std::fs::read_to_string("src/lib.rs").unwrap();
-//! let functions = sengi::function_inputs(&src).unwrap();
 //! let overrides = Overrides::new();
 //! let registry = Registry::with_overrides(&overrides).unwrap();
+//! let config = CorpusConfig::default();
 //!
-//! for function in &functions {
+//! // From Rust source...
+//! let src = std::fs::read_to_string("src/lib.rs").unwrap();
+//! for function in &sengi::function_inputs(&src).unwrap() {
 //!     let shape = function_shape(function, &overrides);
-//!     let corpus = build_corpus(&shape, &registry, &overrides, &CorpusConfig::default());
+//!     let corpus = build_corpus(&shape, &registry, &overrides, &config);
 //!     println!("{}: {} inputs", function.name, corpus.inputs.len());
 //! }
+//!
+//! // ...or from a JSON Schema.
+//! let schema = serde_json::json!({ "type": "integer", "minimum": 1, "maximum": 10 });
+//! let shape = shape_from_schema(&schema, &overrides);
+//! let corpus = build_corpus(&shape, &registry, &overrides, &config);
 //! ```
 
 #![warn(missing_docs)]
 
 pub mod ahp;
+pub mod analysis;
 pub mod char_class;
 pub mod corpus;
 pub mod coverage;
@@ -90,6 +105,7 @@ pub mod report;
 mod resolve;
 pub mod rng;
 pub mod save;
+pub mod schema;
 pub mod shape;
 pub mod stats;
 mod types;

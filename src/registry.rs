@@ -1,7 +1,8 @@
 //! Step 3b: the registry — every kind's parameters together with their AHP
 //! weights, split into distance parameters (with thresholds) and category
-//! parameters (for coverage). Overrides add one kind each
-//! ([`Kind::Custom`]) with their own parameters.
+//! parameters (for coverage). Parameters are shared by a [`Family`] of
+//! kinds (every unsigned integer range is [`Family::UInt`]). Overrides add one
+//! family each ([`Family::Custom`]) with their own parameters.
 //!
 //! # Thresholds
 //!
@@ -23,11 +24,10 @@
 
 use std::collections::HashMap;
 
-use crate::Primitive;
 use crate::ahp::ahp;
 use crate::overrides::Overrides;
 use crate::params::{CategoryFn, DistanceFn, Measure, Param, param_set};
-use crate::value::Kind;
+use crate::value::{Family, Kind};
 
 /// A distance parameter with its AHP weight and threshold scale.
 pub struct DistanceParam {
@@ -60,32 +60,20 @@ pub struct CategoryParam {
 /// Built once with [`Registry::new`], which checks every comparison matrix
 /// for consistency.
 pub struct Registry {
-    distances: HashMap<Kind, Vec<DistanceParam>>,
-    categories: HashMap<Kind, Vec<CategoryParam>>,
+    distances: HashMap<Family, Vec<DistanceParam>>,
+    categories: HashMap<Family, Vec<CategoryParam>>,
 }
 
-/// Every built-in kind of leaf.
-const ALL_KINDS: [Kind; 20] = [
-    Kind::Primitive(Primitive::Bool),
-    Kind::Primitive(Primitive::Char),
-    Kind::Primitive(Primitive::I8),
-    Kind::Primitive(Primitive::I16),
-    Kind::Primitive(Primitive::I32),
-    Kind::Primitive(Primitive::I64),
-    Kind::Primitive(Primitive::I128),
-    Kind::Primitive(Primitive::Isize),
-    Kind::Primitive(Primitive::U8),
-    Kind::Primitive(Primitive::U16),
-    Kind::Primitive(Primitive::U32),
-    Kind::Primitive(Primitive::U64),
-    Kind::Primitive(Primitive::U128),
-    Kind::Primitive(Primitive::Usize),
-    Kind::Primitive(Primitive::F32),
-    Kind::Primitive(Primitive::F64),
-    Kind::Primitive(Primitive::Str),
-    Kind::Primitive(Primitive::String),
-    Kind::Choice,
-    Kind::Length,
+/// Every built-in family of leaf.
+const ALL_FAMILIES: [Family; 8] = [
+    Family::Bool,
+    Family::UInt,
+    Family::Int,
+    Family::Float,
+    Family::Char,
+    Family::Text,
+    Family::Choice,
+    Family::Length,
 ];
 
 impl Registry {
@@ -103,12 +91,12 @@ impl Registry {
             distances: HashMap::new(),
             categories: HashMap::new(),
         };
-        for kind in ALL_KINDS {
-            let set = param_set(kind.clone());
-            registry.add_kind(kind, set.params, set.comparisons)?;
+        for family in ALL_FAMILIES {
+            let set = param_set(&family);
+            registry.add_family(family, set.params, set.comparisons)?;
         }
         for the_override in overrides.all() {
-            let kind = Kind::Custom(the_override.name.clone());
+            let family = Family::Custom(the_override.name.clone());
             let params = the_override.params.clone();
             let comparisons = if the_override.comparisons.is_empty() {
                 // No matrix given: every parameter is equally important.
@@ -116,21 +104,21 @@ impl Registry {
             } else {
                 the_override.comparisons.clone()
             };
-            registry.add_kind(kind, params, comparisons)?;
+            registry.add_family(family, params, comparisons)?;
         }
         Ok(registry)
     }
 
-    /// Weights one kind's parameters with AHP and stores them.
-    fn add_kind(
+    /// Weights one family's parameters with AHP and stores them.
+    fn add_family(
         &mut self,
-        kind: Kind,
+        family: Family,
         params: Vec<Param>,
         comparisons: Vec<Vec<f64>>,
     ) -> Result<(), String> {
         if comparisons.len() != params.len() {
             return Err(format!(
-                "{kind:?}: {} parameters but a {}x{} comparison matrix",
+                "{family:?}: {} parameters but a {}x{} comparison matrix",
                 params.len(),
                 comparisons.len(),
                 comparisons.len()
@@ -143,7 +131,7 @@ impl Registry {
             let result = ahp(&comparisons);
             if result.consistency_ratio > 0.1 {
                 return Err(format!(
-                    "{kind:?}: inconsistent comparisons (consistency ratio {:.3})",
+                    "{family:?}: inconsistent comparisons (consistency ratio {:.3})",
                     result.consistency_ratio
                 ));
             }
@@ -176,36 +164,37 @@ impl Registry {
                 }),
             }
         }
-        self.distances.insert(kind.clone(), kind_distances);
-        self.categories.insert(kind, kind_categories);
+        self.distances.insert(family.clone(), kind_distances);
+        self.categories.insert(family, kind_categories);
         Ok(())
     }
 
     /// The distance parameters of a kind (may be empty, e.g. for `bool`).
     pub fn distances(&self, kind: &Kind) -> &[DistanceParam] {
-        &self.distances[kind]
+        &self.distances[&kind.family()]
     }
 
     /// The category parameters of a kind (may be empty, e.g. for strings).
     pub fn categories(&self, kind: &Kind) -> &[CategoryParam] {
-        &self.categories[kind]
+        &self.categories[&kind.family()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Primitive;
 
     #[test]
     fn built_in_comparisons_are_consistent() {
         let registry = Registry::new().unwrap();
-        for kind in ALL_KINDS {
-            let distance_weights: f64 = registry.distances(&kind).iter().map(|p| p.weight).sum();
-            let category_weights: f64 = registry.categories(&kind).iter().map(|p| p.weight).sum();
+        for family in ALL_FAMILIES {
+            let distance_weights: f64 = registry.distances[&family].iter().map(|p| p.weight).sum();
+            let category_weights: f64 = registry.categories[&family].iter().map(|p| p.weight).sum();
             let total = distance_weights + category_weights;
             assert!(
                 (total - 1.0).abs() < 1e-9,
-                "{kind:?} weights sum to {total}"
+                "{family:?} weights sum to {total}"
             );
         }
     }
@@ -213,7 +202,7 @@ mod tests {
     #[test]
     fn most_important_distance_has_the_lowest_threshold() {
         let registry = Registry::new().unwrap();
-        let params = registry.distances(&Kind::Primitive(Primitive::U32));
+        let params = registry.distances(&Kind::from(Primitive::U32));
         let magnitude = params.iter().find(|p| p.name == "magnitude").unwrap();
         let bits = params.iter().find(|p| p.name == "bits").unwrap();
         assert_eq!(magnitude.threshold_scale, 1.0);
@@ -224,7 +213,7 @@ mod tests {
     fn categories_are_kept_apart_from_distances() {
         let registry = Registry::new().unwrap();
         let u32_categories: Vec<_> = registry
-            .categories(&Kind::Primitive(Primitive::U32))
+            .categories(&Kind::from(Primitive::U32))
             .iter()
             .map(|p| p.name)
             .collect();

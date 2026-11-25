@@ -9,6 +9,9 @@
 //!   the pairwise coverage check instead of the distance check, because a
 //!   0-or-1 difference would pass any θ.
 //!
+//! Integer and float distances are measured relative to the leaf's range
+//! (a `u8`'s is 0–255; a JSON Schema can narrow it), carried by its [`Kind`].
+//!
 //! Normalising every distance to 0–1 is what makes parameters comparable: a
 //! length difference of 1000 and a bit difference of 3 mean nothing next to
 //! each other until both are scaled.
@@ -16,9 +19,9 @@
 //! | Kind | Distances | Categories |
 //! |---|---|---|
 //! | `bool` | – | value |
-//! | unsigned integers | magnitude (log scale), bits (Hamming) | boundary: 0, 1, MAX−1, MAX, other |
-//! | signed integers | magnitude (log scale), bits (Hamming) | sign, boundary: 0, 1, −1, MIN, MAX, other |
-//! | floats | magnitude (exponent) | class: NaN, infinite, zero, subnormal, normal; sign |
+//! | unsigned integers | magnitude (log scale), bits (Hamming) | boundary: 0, 1, min, min+1, max−1, max, other |
+//! | signed integers | magnitude (log scale), bits (Hamming) | sign, boundary: 0, 1, −1, min, min+1, max−1, max, other |
+//! | floats | magnitude (exponent; relative to the range when it is limited) | class: NaN, infinite, zero, subnormal, normal; sign |
 //! | `char` | codepoint | class (see [`crate::char_class`]) |
 //! | `str` / `String` | length, bytes (edit distance), classes (Jaccard) | – |
 //! | enum variant / `Option` | – | variant |
@@ -33,17 +36,18 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use crate::Primitive;
 use crate::char_class::{CharClass, classify};
-use crate::value::{Kind, LeafValue};
+use crate::shape::Simple;
+use crate::value::{Family, Kind, LeafValue};
 
 /// Distance between two values on one parameter, normalised to `0.0..=1.0`.
-pub type DistanceFn = Rc<dyn Fn(&LeafValue, &LeafValue) -> f64>;
+/// The kind carries the leaf's range, e.g. `0..=255` for a `u8`.
+pub type DistanceFn = Rc<dyn Fn(&Kind, &LeafValue, &LeafValue) -> f64>;
 
 /// The category a value falls into on one parameter, e.g. `"max"`.
-pub type CategoryFn = Rc<dyn Fn(&LeafValue) -> String>;
+pub type CategoryFn = Rc<dyn Fn(&Kind, &LeafValue) -> String>;
 
-/// How a parameter compares two values.
+/// How a parameter compares values.
 #[derive(Clone)]
 pub enum Measure {
     /// A continuous, normalised distance. Used for the θ check.
@@ -61,7 +65,7 @@ pub struct Param {
     pub measure: Measure,
 }
 
-/// All parameters of one kind of leaf, plus how important they are
+/// All parameters of one family of leaf, plus how important they are
 /// relative to each other.
 pub struct ParamSet {
     /// The parameters, in the same order as the matrix rows.
@@ -70,42 +74,29 @@ pub struct ParamSet {
     pub comparisons: Vec<Vec<f64>>,
 }
 
-/// The built-in parameters for a kind of leaf.
+/// The built-in parameters for a family of leaf.
 ///
-/// All widths of integer share one definition, scaled by their bit count.
-/// `usize`/`isize` are treated as 64-bit.
-pub fn param_set(kind: Kind) -> ParamSet {
-    match kind {
-        Kind::Choice => choice_params(),
-        Kind::Length => length_params(),
-        Kind::Custom(name) => {
+/// Every integer width and range shares one definition; the distances are
+/// scaled by the leaf's own range when they are measured.
+pub fn param_set(family: &Family) -> ParamSet {
+    match family {
+        Family::Bool => bool_params(),
+        Family::UInt => unsigned_params(),
+        Family::Int => signed_params(),
+        Family::Float => float_params(),
+        Family::Char => char_params(),
+        Family::Text => text_params(),
+        Family::Choice => choice_params(),
+        Family::Length => length_params(),
+        Family::Custom(name) => {
             panic!("`{name}` is an override; its parameters come from the override")
         }
-        Kind::Primitive(primitive) => match primitive {
-            Primitive::Bool => bool_params(),
-            Primitive::U8 => unsigned_params(8),
-            Primitive::U16 => unsigned_params(16),
-            Primitive::U32 => unsigned_params(32),
-            Primitive::U64 => unsigned_params(64),
-            Primitive::U128 => unsigned_params(128),
-            Primitive::Usize => unsigned_params(64),
-            Primitive::I8 => signed_params(8),
-            Primitive::I16 => signed_params(16),
-            Primitive::I32 => signed_params(32),
-            Primitive::I64 => signed_params(64),
-            Primitive::I128 => signed_params(128),
-            Primitive::Isize => signed_params(64),
-            Primitive::F32 => float_params(127),
-            Primitive::F64 => float_params(1023),
-            Primitive::Char => char_params(),
-            Primitive::Str | Primitive::String => text_params(),
-        },
     }
 }
 
 fn distance(
     name: &'static str,
-    distance: impl Fn(&LeafValue, &LeafValue) -> f64 + 'static,
+    distance: impl Fn(&Kind, &LeafValue, &LeafValue) -> f64 + 'static,
 ) -> Param {
     Param {
         name,
@@ -113,7 +104,7 @@ fn distance(
     }
 }
 
-fn category(name: &'static str, category: impl Fn(&LeafValue) -> String + 'static) -> Param {
+fn category(name: &'static str, category: impl Fn(&Kind, &LeafValue) -> String + 'static) -> Param {
     Param {
         name,
         measure: Measure::Category(Rc::new(category)),
@@ -124,32 +115,38 @@ fn category(name: &'static str, category: impl Fn(&LeafValue) -> String + 'stati
 
 fn bool_params() -> ParamSet {
     ParamSet {
-        params: vec![category("value", |v| bool_of(v).to_string())],
+        params: vec![category("value", |_, v| bool_of(v).to_string())],
         comparisons: vec![vec![1.0]],
     }
 }
 
 // ---------------------------------------------------------------- unsigned integers
 
-fn unsigned_params(bits: u32) -> ParamSet {
-    let max = unsigned_max(bits);
+fn unsigned_params() -> ParamSet {
     ParamSet {
         params: vec![
-            // How far apart the values are on a log scale, so 1 vs 2 counts
-            // as much as 1000 vs 2000.
-            distance("magnitude", move |a, b| {
-                let a = log2_1p(uint_of(a) as f64);
-                let b = log2_1p(uint_of(b) as f64);
-                (a - b).abs() / bits as f64
+            // How far each value is from the range's minimum, on a log
+            // scale, so 1 vs 2 counts as much as 1000 vs 2000.
+            distance("magnitude", |kind, a, b| {
+                let (min, max) = uint_range(kind);
+                let scale = log2_1p((max - min) as f64);
+                if scale == 0.0 {
+                    return 0.0;
+                }
+                let a = log2_1p(uint_of(a).saturating_sub(min) as f64);
+                let b = log2_1p(uint_of(b).saturating_sub(min) as f64);
+                ((a - b).abs() / scale).min(1.0)
             }),
-            // How many bits differ.
-            distance("bits", move |a, b| {
+            // How many bits differ, out of the bits the range needs.
+            distance("bits", |kind, a, b| {
+                let (_, max) = uint_range(kind);
                 let differing = uint_of(a) ^ uint_of(b);
-                differing.count_ones() as f64 / bits as f64
+                (differing.count_ones() as f64 / bit_length(max).max(1) as f64).min(1.0)
             }),
-            // Which edge case it is: 0, 1, MAX - 1, MAX or other.
-            category("boundary", move |v| {
-                unsigned_boundary(uint_of(v), max).to_string()
+            // Which edge case it is: 0, 1, the range's ends, or other.
+            category("boundary", |kind, v| {
+                let (min, max) = uint_range(kind);
+                unsigned_boundary(uint_of(v), min, max).to_string()
             }),
         ],
         #[rustfmt::skip]
@@ -162,14 +159,18 @@ fn unsigned_params(bits: u32) -> ParamSet {
     }
 }
 
-fn unsigned_boundary(value: u128, max: u128) -> &'static str {
+fn unsigned_boundary(value: u128, min: u128, max: u128) -> &'static str {
     if value == 0 {
         "zero"
     } else if value == 1 {
         "one"
+    } else if value == min {
+        "min"
     } else if value == max {
         "max"
-    } else if value == max - 1 {
+    } else if min.checked_add(1) == Some(value) {
+        "min + 1"
+    } else if max.checked_sub(1) == Some(value) {
         "max - 1"
     } else {
         "other"
@@ -178,28 +179,37 @@ fn unsigned_boundary(value: u128, max: u128) -> &'static str {
 
 // ---------------------------------------------------------------- signed integers
 
-fn signed_params(bits: u32) -> ParamSet {
-    let (min, max) = signed_range(bits);
+fn signed_params() -> ParamSet {
     ParamSet {
         params: vec![
-            category("sign", |v| match int_of(v).signum() {
+            category("sign", |_, v| match int_of(v).signum() {
                 -1 => "negative".to_string(),
                 0 => "zero".to_string(),
                 _ => "positive".to_string(),
             }),
-            // Distance between the absolute values on a log scale.
-            distance("magnitude", move |a, b| {
-                let a = log2_1p(int_of(a).unsigned_abs() as f64);
-                let b = log2_1p(int_of(b).unsigned_abs() as f64);
-                (a - b).abs() / bits as f64
+            // How far each value is from zero (or the end of the range
+            // nearest zero), on a log scale.
+            distance("magnitude", |kind, a, b| {
+                let (min, max) = int_range(kind);
+                let origin = 0.clamp(min, max);
+                let scale = log2_1p(min.abs_diff(origin).max(max.abs_diff(origin)) as f64);
+                if scale == 0.0 {
+                    return 0.0;
+                }
+                let a = log2_1p(int_of(a).abs_diff(origin) as f64);
+                let b = log2_1p(int_of(b).abs_diff(origin) as f64);
+                ((a - b).abs() / scale).min(1.0)
             }),
             // How many bits of the two's complement representation differ.
-            distance("bits", move |a, b| {
+            distance("bits", |kind, a, b| {
+                let (min, max) = int_range(kind);
+                let bits = signed_bits(min, max);
                 let differing = (int_of(a) ^ int_of(b)) as u128 & unsigned_max(bits);
                 differing.count_ones() as f64 / bits as f64
             }),
-            // Which edge case it is: 0, 1, -1, MIN, MAX or other.
-            category("boundary", move |v| {
+            // Which edge case it is: 0, 1, -1, the range's ends, or other.
+            category("boundary", |kind, v| {
+                let (min, max) = int_range(kind);
                 signed_boundary(int_of(v), min, max).to_string()
             }),
         ],
@@ -225,35 +235,67 @@ fn signed_boundary(value: i128, min: i128, max: i128) -> &'static str {
         "min"
     } else if value == max {
         "max"
+    } else if min.checked_add(1) == Some(value) {
+        "min + 1"
+    } else if max.checked_sub(1) == Some(value) {
+        "max - 1"
     } else {
         "other"
     }
 }
 
+/// Bits needed to hold every value in `min..=max` in two's complement.
+fn signed_bits(min: i128, max: i128) -> u32 {
+    if min >= 0 {
+        return bit_length(max as u128).max(1);
+    }
+    let positive = bit_length(max.max(0) as u128);
+    let negative = bit_length((-(min + 1)) as u128);
+    1 + positive.max(negative)
+}
+
 // ---------------------------------------------------------------- floats
 
-/// `max_exponent` is 127 for `f32` and 1023 for `f64`.
-fn float_params(max_exponent: i32) -> ParamSet {
+fn float_params() -> ParamSet {
     ParamSet {
         params: vec![
             // NaN, infinite, zero, subnormal or normal.
-            category("class", |v| float_class(float_of(v)).to_string()),
-            category("sign", |v| {
+            category("class", |_, v| float_class(float_of(v)).to_string()),
+            category("sign", |_, v| {
                 if float_of(v).is_sign_negative() {
                     "negative".to_string()
                 } else {
                     "positive".to_string()
                 }
             }),
-            // Distance between the exponents. Only meaningful for two normal
-            // numbers; any other difference is already covered by `class`.
-            distance("magnitude", move |a, b| {
+            // Within a limited range (e.g. 0 to 1): the difference relative
+            // to the range. Otherwise: the distance between the exponents,
+            // only meaningful for two normal numbers; any other difference
+            // is already covered by `class`.
+            distance("magnitude", |kind, a, b| {
                 let (a, b) = (float_of(a), float_of(b));
+                let Kind::Simple(Simple::Float {
+                    min,
+                    max,
+                    single,
+                    specials,
+                }) = kind
+                else {
+                    panic!("expected a float kind, got {kind:?}")
+                };
+                let span = max - min;
+                if !specials && span.is_finite() {
+                    if span == 0.0 || !(a.is_finite() && b.is_finite()) {
+                        return 0.0;
+                    }
+                    return ((a - b).abs() / span).min(1.0);
+                }
                 if !(a.is_normal() && b.is_normal()) {
                     return 0.0;
                 }
+                let max_exponent = if *single { 127.0 } else { 1023.0 };
                 let difference = (a.abs().log2() - b.abs().log2()).abs();
-                (difference / (2.0 * max_exponent as f64)).min(1.0)
+                (difference / (2.0 * max_exponent)).min(1.0)
             }),
         ],
         #[rustfmt::skip]
@@ -285,8 +327,8 @@ fn float_class(value: f64) -> &'static str {
 fn char_params() -> ParamSet {
     ParamSet {
         params: vec![
-            category("class", |v| format!("{:?}", classify(char_of(v)))),
-            distance("codepoint", |a, b| {
+            category("class", |_, v| format!("{:?}", classify(char_of(v)))),
+            distance("codepoint", |_, a, b| {
                 let difference = (char_of(a) as u32).abs_diff(char_of(b) as u32);
                 difference as f64 / char::MAX as u32 as f64
             }),
@@ -306,11 +348,11 @@ fn text_params() -> ParamSet {
     ParamSet {
         params: vec![
             // Difference in length, relative to the longer string.
-            distance("length", |a, b| {
+            distance("length", |_, a, b| {
                 relative_difference(text_of(a).chars().count(), text_of(b).chars().count())
             }),
             // Edit distance between the bytes, relative to the longer string.
-            distance("bytes", |a, b| {
+            distance("bytes", |_, a, b| {
                 let (a, b) = (text_of(a).as_bytes(), text_of(b).as_bytes());
                 let longest = a.len().max(b.len());
                 if longest == 0 {
@@ -319,7 +361,7 @@ fn text_params() -> ParamSet {
                 levenshtein(a, b) as f64 / longest as f64
             }),
             // Which kinds of characters appear (Jaccard distance).
-            distance("classes", |a, b| {
+            distance("classes", |_, a, b| {
                 let a: BTreeSet<CharClass> = text_of(a).chars().map(classify).collect();
                 let b: BTreeSet<CharClass> = text_of(b).chars().map(classify).collect();
                 let union = a.union(&b).count();
@@ -359,14 +401,14 @@ fn levenshtein(a: &[u8], b: &[u8]) -> usize {
 
 fn choice_params() -> ParamSet {
     ParamSet {
-        params: vec![category("variant", |v| choice_of(v).to_string())],
+        params: vec![category("variant", |_, v| choice_of(v).to_string())],
         comparisons: vec![vec![1.0]],
     }
 }
 
 fn length_params() -> ParamSet {
     ParamSet {
-        params: vec![distance("length", |a, b| {
+        params: vec![distance("length", |_, a, b| {
             relative_difference(length_of(a), length_of(b))
         })],
         comparisons: vec![vec![1.0]],
@@ -388,19 +430,30 @@ fn relative_difference(a: usize, b: usize) -> f64 {
     a.abs_diff(b) as f64 / largest as f64
 }
 
-fn unsigned_max(bits: u32) -> u128 {
-    if bits == 128 {
+/// Bits needed to write `value` in binary: 255 -> 8, 256 -> 9, 0 -> 0.
+pub(crate) fn bit_length(value: u128) -> u32 {
+    128 - value.leading_zeros()
+}
+
+pub(crate) fn unsigned_max(bits: u32) -> u128 {
+    if bits >= 128 {
         u128::MAX
     } else {
         (1 << bits) - 1
     }
 }
 
-fn signed_range(bits: u32) -> (i128, i128) {
-    if bits == 128 {
-        (i128::MIN, i128::MAX)
-    } else {
-        (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+fn uint_range(kind: &Kind) -> (u128, u128) {
+    match kind {
+        Kind::Simple(Simple::UInt { min, max }) => (*min, *max),
+        other => panic!("expected an unsigned integer kind, got {other:?}"),
+    }
+}
+
+fn int_range(kind: &Kind) -> (i128, i128) {
+    match kind {
+        Kind::Simple(Simple::Int { min, max }) => (*min, *max),
+        other => panic!("expected a signed integer kind, got {other:?}"),
     }
 }
 
@@ -463,12 +516,13 @@ fn length_of(value: &LeafValue) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Primitive;
 
     /// Distance on one named distance parameter of a kind.
     fn distance_on(kind: Kind, name: &str, a: LeafValue, b: LeafValue) -> f64 {
-        for param in param_set(kind.clone()).params {
+        for param in param_set(&kind.family()).params {
             if let (true, Measure::Distance(distance)) = (param.name == name, &param.measure) {
-                return distance(&a, &b);
+                return distance(&kind, &a, &b);
             }
         }
         panic!("{kind:?} has no distance parameter {name}");
@@ -476,9 +530,9 @@ mod tests {
 
     /// Category of a value on one named category parameter of a kind.
     fn category_of(kind: Kind, name: &str, value: LeafValue) -> String {
-        for param in param_set(kind.clone()).params {
+        for param in param_set(&kind.family()).params {
             if let (true, Measure::Category(category)) = (param.name == name, &param.measure) {
-                return category(&value);
+                return category(&kind, &value);
             }
         }
         panic!("{kind:?} has no category parameter {name}");
@@ -488,9 +542,15 @@ mod tests {
         LeafValue::Text(s.to_string())
     }
 
-    const STRING: Kind = Kind::Primitive(Primitive::String);
-    const U8: Kind = Kind::Primitive(Primitive::U8);
-    const I32: Kind = Kind::Primitive(Primitive::I32);
+    const STRING: Kind = Kind::Simple(Simple::Text {
+        min_len: 0,
+        max_len: None,
+    });
+    const U8: Kind = Kind::Simple(Simple::UInt { min: 0, max: 255 });
+    const I32: Kind = Kind::Simple(Simple::Int {
+        min: i32::MIN as i128,
+        max: i32::MAX as i128,
+    });
 
     #[test]
     fn text_distances() {
@@ -524,37 +584,58 @@ mod tests {
     }
 
     #[test]
+    fn ranges_set_the_boundaries_and_scale() {
+        use LeafValue::{Int, UInt};
+        let small = Kind::Simple(Simple::UInt { min: 5, max: 10 });
+        assert_eq!(category_of(small.clone(), "boundary", UInt(5)), "min");
+        assert_eq!(category_of(small.clone(), "boundary", UInt(6)), "min + 1");
+        assert_eq!(category_of(small.clone(), "boundary", UInt(9)), "max - 1");
+        assert_eq!(category_of(small.clone(), "boundary", UInt(10)), "max");
+        // Measured from the minimum, so the two ends are as far apart as it gets.
+        assert_eq!(distance_on(small, "magnitude", UInt(5), UInt(10)), 1.0);
+
+        // A range that excludes zero is measured from its end nearest zero.
+        let negative = Kind::Simple(Simple::Int {
+            min: -100,
+            max: -50,
+        });
+        assert_eq!(distance_on(negative, "magnitude", Int(-50), Int(-100)), 1.0);
+
+        let unit = Kind::Simple(Simple::Float {
+            min: 0.0,
+            max: 1.0,
+            single: false,
+            specials: false,
+        });
+        let d = distance_on(
+            unit,
+            "magnitude",
+            LeafValue::Float(0.25),
+            LeafValue::Float(0.75),
+        );
+        assert_eq!(d, 0.5);
+    }
+
+    #[test]
     fn every_distance_stays_between_zero_and_one() {
         use LeafValue::*;
         let extremes = [
-            (Kind::Primitive(Primitive::U128), UInt(0), UInt(u128::MAX)),
+            (Kind::from(Primitive::U128), UInt(0), UInt(u128::MAX)),
+            (Kind::from(Primitive::I128), Int(i128::MIN), Int(i128::MAX)),
             (
-                Kind::Primitive(Primitive::I128),
-                Int(i128::MIN),
-                Int(i128::MAX),
-            ),
-            (
-                Kind::Primitive(Primitive::F64),
+                Kind::from(Primitive::F64),
                 Float(f64::MIN_POSITIVE),
                 Float(f64::MAX),
             ),
-            (
-                Kind::Primitive(Primitive::F64),
-                Float(f64::NAN),
-                Float(-0.0),
-            ),
-            (
-                Kind::Primitive(Primitive::Char),
-                Char('\0'),
-                Char(char::MAX),
-            ),
+            (Kind::from(Primitive::F64), Float(f64::NAN), Float(-0.0)),
+            (Kind::from(Primitive::Char), Char('\0'), Char(char::MAX)),
             (STRING, text(""), text("a long string")),
             (Kind::Length, Length(0), Length(1000)),
         ];
         for (kind, a, b) in extremes {
-            for param in param_set(kind.clone()).params {
+            for param in param_set(&kind.family()).params {
                 if let Measure::Distance(distance) = &param.measure {
-                    let d = distance(&a, &b);
+                    let d = distance(&kind, &a, &b);
                     assert!((0.0..=1.0).contains(&d), "{kind:?} {}: {d}", param.name);
                 }
             }

@@ -41,7 +41,7 @@ pub fn compare(a: &Input, b: &Input, registry: &Registry, theta: f64) -> Vec<Par
             distances.push(ParamDistance {
                 path: path.clone(),
                 param: param.name,
-                distance: (param.distance)(&leaf_a.value, &leaf_b.value),
+                distance: (param.distance)(&leaf_a.kind, &leaf_a.value, &leaf_b.value),
                 threshold: theta * param.threshold_scale,
             });
         }
@@ -63,7 +63,7 @@ pub fn clearly_different(a: &Input, b: &Input, registry: &Registry, theta: f64) 
             if threshold > 1.0 {
                 continue; // Distances never exceed 1, so this can't trigger.
             }
-            if (param.distance)(&leaf_a.value, &leaf_b.value) >= threshold {
+            if (param.distance)(&leaf_a.kind, &leaf_a.value, &leaf_b.value) >= threshold {
                 return true;
             }
         }
@@ -90,7 +90,8 @@ pub fn weighted_mean(a: &Input, b: &Input, registry: &Registry) -> f64 {
         let mut weighted_sum = 0.0;
         let mut weight_sum = 0.0;
         for param in params {
-            weighted_sum += param.weight * (param.distance)(&leaf_a.value, &leaf_b.value);
+            weighted_sum +=
+                param.weight * (param.distance)(&leaf_a.kind, &leaf_a.value, &leaf_b.value);
             weight_sum += param.weight;
         }
         // Rescale so a leaf that differs maximally on every distance scores 1.
@@ -111,14 +112,14 @@ mod tests {
 
     fn number(value: u128) -> InputLeaf {
         InputLeaf {
-            kind: Kind::Primitive(Primitive::U8),
+            kind: Kind::from(Primitive::U8),
             value: LeafValue::UInt(value),
         }
     }
 
     fn text(value: &str) -> InputLeaf {
         InputLeaf {
-            kind: Kind::Primitive(Primitive::String),
+            kind: Kind::from(Primitive::String),
             value: LeafValue::Text(value.to_string()),
         }
     }

@@ -94,7 +94,7 @@ impl Override {
     ) -> Override {
         self.params.push(Param {
             name,
-            measure: Measure::Distance(Rc::new(move |a, b| distance(json_of(a), json_of(b)))),
+            measure: Measure::Distance(Rc::new(move |_, a, b| distance(json_of(a), json_of(b)))),
         });
         self
     }
@@ -108,7 +108,7 @@ impl Override {
     ) -> Override {
         self.params.push(Param {
             name,
-            measure: Measure::Category(Rc::new(move |v| category(json_of(v)))),
+            measure: Measure::Category(Rc::new(move |_, v| category(json_of(v)))),
         });
         self
     }
@@ -237,7 +237,7 @@ mod tests {
         let Shape::Fields(params) = shape else {
             panic!()
         };
-        let Shape::List(read) = &params[1].1 else {
+        let Shape::List(read, _) = &params[1].1 else {
             panic!()
         };
         let Shape::Fields(read_fields) = read.as_ref() else {
@@ -247,7 +247,10 @@ mod tests {
             read_fields[1],
             ("sequence".into(), Shape::Custom("dna".into()))
         );
-        assert_eq!(read_fields[0], ("id".into(), Shape::Simple(Primitive::U32)));
+        assert_eq!(
+            read_fields[0],
+            ("id".into(), Shape::Simple(Primitive::U32.into()))
+        );
     }
 
     #[test]

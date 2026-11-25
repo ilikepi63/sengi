@@ -7,11 +7,11 @@ fn main() {
     let registry = Registry::new().unwrap();
     let theta = 0.5;
     for kind in [
-        Kind::Primitive(Primitive::U64),
-        Kind::Primitive(Primitive::I64),
-        Kind::Primitive(Primitive::F64),
-        Kind::Primitive(Primitive::Char),
-        Kind::Primitive(Primitive::String),
+        Kind::from(Primitive::U64),
+        Kind::from(Primitive::I64),
+        Kind::from(Primitive::F64),
+        Kind::from(Primitive::Char),
+        Kind::from(Primitive::String),
     ] {
         println!("{kind:?}");
         for p in registry.distances(&kind) {

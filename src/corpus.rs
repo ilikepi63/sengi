@@ -175,8 +175,8 @@ mod tests {
 
     fn two_u64s() -> Shape {
         Shape::Fields(vec![
-            ("left".into(), Shape::Simple(Primitive::U64)),
-            ("right".into(), Shape::Simple(Primitive::U64)),
+            ("left".into(), Shape::Simple(Primitive::U64.into())),
+            ("right".into(), Shape::Simple(Primitive::U64.into())),
         ])
     }
 
@@ -204,8 +204,8 @@ mod tests {
         // Bools only have a category, so coverage alone decides: every pair
         // (a, b) is needed once, and nothing else is ever new.
         let shape = Shape::Fields(vec![
-            ("a".into(), Shape::Simple(Primitive::Bool)),
-            ("b".into(), Shape::Simple(Primitive::Bool)),
+            ("a".into(), Shape::Simple(Primitive::Bool.into())),
+            ("b".into(), Shape::Simple(Primitive::Bool.into())),
         ]);
         let registry = Registry::new().unwrap();
         let corpus = build_corpus(

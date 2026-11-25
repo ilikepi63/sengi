@@ -165,19 +165,61 @@ table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.model { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
+@media (max-width: 860px) { .model { grid-template-columns: minmax(0, 1fr); } }
+.model h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.schema {
+  margin: 0;
+  max-height: 520px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--page);
+  border: 1px solid var(--grid);
+  border-radius: 6px;
+  font: 12px/1.45 var(--mono);
+  white-space: pre;
+}
+#leaves td { white-space: nowrap; }
+#leaves td.leaf { font-family: var(--mono); font-size: 12px; white-space: normal; overflow-wrap: break-word; }
+#leaves td.type { color: var(--ink-2); white-space: normal; }
+#leaves tr.first td { border-top: 1px solid var(--axis); }
+.measure { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+.weight { display: inline-block; height: 6px; border-radius: 3px; background: var(--series-1); vertical-align: middle; margin-right: 6px; }
+.flag { color: var(--series-2); }
+#leaves .label { color: var(--muted); font-size: 12px; }
 </style>
 
 <main>
   <header>
-    <p class="eyebrow">Corpus report</p>
+    <p class="eyebrow" id="eyebrow">Corpus report</p>
     <h1 id="signature"></h1>
     <ul class="facts" id="facts"></ul>
   </header>
 
+  <section>
+    <h2>Tested model</h2>
+    <p class="note">What the inputs are made of, and how sengi measures them. Every simple value, choice and collection length is a leaf; each leaf is compared on the parameters listed. A distance must reach its threshold to make two inputs different (above 1 it never decides alone); categories are covered pairwise. Weights come from AHP and sum to 1 per leaf.</p>
+    <div class="model">
+      <div>
+        <h3>Input schema</h3>
+        <pre class="schema" id="schema"></pre>
+      </div>
+      <div>
+        <h3>Leaves and their parameters</h3>
+        <div class="table-wrap">
+          <table id="leaves">
+            <thead><tr><th>Leaf</th><th>Type</th><th>Parameter</th><th>Weight</th><th>Threshold</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <div class="row">
     <section>
       <h2>Distance between every pair</h2>
-      <p class="note">Each cell is the weighted mean distance between two inputs, in the order they were kept. Light cells away from the diagonal are near-duplicates.</p>
+      <p class="note">Each cell is the weighted mean distance between two inputs, in order. Light cells away from the diagonal are near-duplicates.</p>
       <div class="legend"><span>0 same</span><span class="ramp"></span><span>1 completely different</span></div>
       <div class="chart" id="heatmap"></div>
     </section>
@@ -185,10 +227,7 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
     <section>
       <h2>Corpus map</h2>
       <p class="note">Inputs placed so that the distance between dots approximates the distance between inputs. The axes have no units. An even spread means a well-spread corpus. Inputs that are equally far from everything else land on the same spot and overlap.</p>
-      <div class="legend">
-        <span><span class="swatch" style="background: var(--series-1)"></span>Kept for new categories</span>
-        <span><span class="swatch" style="background: var(--series-2)"></span>Kept for distance</span>
-      </div>
+      <div class="legend" id="map-legend"></div>
       <div class="chart" id="map"></div>
     </section>
   </div>
@@ -203,10 +242,16 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
     <div class="chart" id="breakdown"></div>
   </section>
 
-  <section>
+  <section id="growth-section">
     <h2>Growth</h2>
     <p class="note">Corpus size against candidates generated. A long flat tail means new candidates stopped adding anything.</p>
     <div class="chart" id="growth"></div>
+  </section>
+
+  <section>
+    <h2>Near-duplicates</h2>
+    <p class="note">Pairs of inputs with the same categories that aren't clearly different on any distance at θ: they exercise the same thing, and one of each pair could go. Each lists the parameters that came closest to telling them apart, as distance / threshold.</p>
+    <div id="duplicates"></div>
   </section>
 
   <section>
@@ -214,7 +259,7 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
       <summary>All inputs</summary>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>Kept for</th><th>At attempt</th><th>Value</th></tr></thead>
+          <thead id="rows-head"></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
@@ -267,29 +312,35 @@ function hideTooltip() {
 
 function inputHtml(index) {
   const input = DATA.inputs[index];
-  return `<div><b>#${index + 1}</b> <span class="label">kept for ${input.kept_for}, attempt ${input.accepted_at}</span></div>` +
+  const about = DATA.generated
+    ? `kept for ${input.kept_for}, attempt ${input.accepted_at}`
+    : nearestText(input);
+  return `<div><b>#${index + 1}</b> <span class="label">${about}</span></div>` +
     `<code>${escapeHtml(short(input.value, 240))}</code>`;
 }
+
+function nearestText(input) {
+  if (!input.nearest) return "";
+  return `nearest #${input.nearest.index}, distance ${input.nearest.distance.toFixed(3)}`;
+}
+
+// Inputs that are part of some near-duplicate pair (1-based).
+const DUPLICATED = new Set(DATA.near_duplicates.flatMap(pair => [pair.a, pair.b]));
 
 // ------------------------------------------------------------ header
 
 function renderHeader() {
-  const params = DATA.params.map(p => `${p.name}: ${p.type}`).join(", ");
-  document.getElementById("signature").textContent = `${DATA.function}(${params})`;
-
-  const s = DATA.stats;
-  const facts = [
-    ["inputs", s.size],
-    ["attempts", s.attempts],
-    ["accepted", (s.acceptance_rate * 100).toFixed(1) + "%"],
-    ["for categories", s.kept_for_categories],
-    ["for distance", s.kept_for_distance],
-    ["θ", DATA.theta],
-    ["seed", DATA.seed],
-    ["stopped", DATA.stop_reason],
-  ];
+  document.getElementById("eyebrow").textContent = DATA.generated ? "Corpus report" : "Input analysis";
+  document.getElementById("signature").textContent = DATA.label;
   document.getElementById("facts").innerHTML =
-    facts.map(([label, value]) => `<li>${label} <b>${escapeHtml(String(value))}</b></li>`).join("");
+    DATA.facts.map(([label, value]) => `<li>${label} <b>${escapeHtml(String(value))}</b></li>`).join("");
+
+  const swatch = (color, text) =>
+    `<span><span class="swatch" style="background: var(${color})"></span>${text}</span>`;
+  document.getElementById("map-legend").innerHTML = DATA.generated
+    ? swatch("--series-1", "Kept for new categories") + swatch("--series-2", "Kept for distance")
+    : swatch("--series-1", "Input") + swatch("--series-2", "Part of a near-duplicate pair");
+  document.getElementById("growth-section").hidden = !DATA.generated;
 }
 
 // ------------------------------------------------------------ heatmap
@@ -375,7 +426,8 @@ function renderMap() {
   DATA.inputs.forEach((input, index) => {
     const cx = offsetX + (input.x - minX) * scale;
     const cy = offsetY + (input.y - minY) * scale;
-    const color = input.kept_for === "distance" ? css("--series-2") : css("--series-1");
+    const second = DATA.generated ? input.kept_for === "distance" : DUPLICATED.has(index + 1);
+    const color = second ? css("--series-2") : css("--series-1");
     const dot = el("circle", { cx, cy, r: 5, fill: color, stroke: css("--surface"),
       "stroke-width": 2 }, svg);
     // A larger invisible target than the dot itself.
@@ -480,7 +532,8 @@ function renderGrowth() {
   host.innerHTML = "";
   const width = 960, height = 240;
   const left = 44, right = 16, top = 12, bottom = 28;
-  const attempts = Math.max(1, DATA.stats.attempts);
+  if (!DATA.generated) return;
+  const attempts = Math.max(1, DATA.attempts);
   const size = DATA.inputs.length;
   const xTicks = niceTicks(attempts, 6);
   const yTicks = niceTicks(Math.max(1, size), 4);
@@ -532,9 +585,88 @@ function renderGrowth() {
 // ------------------------------------------------------------ table
 
 function renderTable() {
-  document.getElementById("rows").innerHTML = DATA.inputs.map((input, index) =>
-    `<tr><td>${index + 1}</td><td>${input.kept_for}</td><td>${input.accepted_at}</td>` +
-    `<td><code>${escapeHtml(JSON.stringify(input.value))}</code></td></tr>`).join("");
+  const head = DATA.generated
+    ? ["#", "Kept for", "At attempt", "Nearest", "Value"]
+    : ["#", "Nearest", "Value"];
+  document.getElementById("rows-head").innerHTML =
+    `<tr>${head.map(h => `<th>${h}</th>`).join("")}</tr>`;
+  document.getElementById("rows").innerHTML = DATA.inputs.map((input, index) => {
+    const generated = DATA.generated
+      ? `<td>${input.kept_for}</td><td>${input.accepted_at}</td>` : "";
+    return `<tr><td>${index + 1}</td>${generated}<td>${nearestText(input)}</td>` +
+      `<td><code>${escapeHtml(JSON.stringify(input.value))}</code></td></tr>`;
+  }).join("");
+}
+
+// Schema keywords in the order people write them, rather than alphabetical.
+const KEY_ORDER = ["$schema", "title", "description", "type", "const", "enum", "format",
+  "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "minLength", "maxLength",
+  "minItems", "maxItems", "minProperties", "maxProperties", "required", "properties",
+  "prefixItems", "items", "additionalProperties", "oneOf", "anyOf", "allOf"];
+
+function ordered(value, inProperties) {
+  if (Array.isArray(value)) return value.map(v => ordered(v, false));
+  if (value === null || typeof value !== "object") return value;
+  const rank = key => inProperties ? 0 : (KEY_ORDER.indexOf(key) + 1 || KEY_ORDER.length + 1);
+  const result = {};
+  for (const key of Object.keys(value).sort((a, b) => rank(a) - rank(b))) {
+    // Property names are data, not keywords: keep their order and recurse.
+    result[key] = ordered(value[key], key === "properties" && !inProperties);
+  }
+  return result;
+}
+
+function breakablePath(path) {
+  return escapeHtml(path).replace(/([.\]])/g, "$1<wbr>");
+}
+
+function renderModel() {
+  document.getElementById("schema").textContent = JSON.stringify(ordered(DATA.model.schema, false), null, 2);
+  const rows = [];
+  for (const leaf of DATA.model.leaves) {
+    const span = Math.max(1, leaf.params.length);
+    const head = `<td class="leaf" rowspan="${span}">${breakablePath(leaf.path)}</td>` +
+      `<td class="type" rowspan="${span}">${escapeHtml(leaf.type)}</td>`;
+    if (leaf.params.length === 0) {
+      rows.push(`<tr class="first">${head}<td colspan="3" class="flag">${escapeHtml(leaf.note || "")}</td></tr>`);
+      continue;
+    }
+    leaf.params.forEach((p, i) => {
+      const color = p.measure === "distance" ? "--series-1" : "--series-2";
+      const threshold = p.measure !== "distance" ? "pairwise coverage"
+        : p.threshold > 1 ? `${p.threshold.toFixed(2)} (never alone)` : p.threshold.toFixed(2);
+      rows.push(`<tr${i === 0 ? ' class="first"' : ""}>${i === 0 ? head : ""}` +
+        `<td><span class="measure" style="background: var(${color})"></span>${escapeHtml(p.name)} ` +
+        `<span class="label">${p.measure}</span></td>` +
+        `<td><span class="weight" style="width: ${Math.round(p.weight * 60)}px; background: var(${color})"></span>${p.weight.toFixed(2)}</td>` +
+        `<td>${threshold}</td></tr>`);
+    });
+  }
+  document.querySelector("#leaves tbody").innerHTML = rows.join("");
+}
+
+function renderDuplicates() {
+  const host = document.getElementById("duplicates");
+  const pairs = DATA.near_duplicates;
+  if (pairs.length === 0) {
+    host.innerHTML = `<p class="empty">None: every pair differs in a category, or clearly on some distance.</p>`;
+    return;
+  }
+  const shown = pairs.slice(0, 200);
+  const rows = shown.map(pair => {
+    const closest = pair.closest.length === 0
+      ? "identical"
+      : pair.closest.map(c =>
+          `${escapeHtml(c.leaf)} / ${c.parameter} ${c.distance.toFixed(2)} / ${c.threshold.toFixed(2)}`).join("<br>");
+    return `<tr><td>#${pair.a}</td><td>#${pair.b}</td><td>${pair.distance.toFixed(3)}</td><td>${closest}</td>` +
+      `<td><code>${escapeHtml(short(DATA.inputs[pair.a - 1].value, 160))}</code><br>` +
+      `<code>${escapeHtml(short(DATA.inputs[pair.b - 1].value, 160))}</code></td></tr>`;
+  }).join("");
+  const more = pairs.length > shown.length
+    ? `<p class="note">Showing ${shown.length} of ${pairs.length} pairs.</p>` : "";
+  host.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Input</th><th>Input</th>` +
+    `<th>Distance</th><th>Closest to different</th><th>Values</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table></div>${more}`;
 }
 
 function renderAll() {
@@ -545,7 +677,9 @@ function renderAll() {
 }
 
 renderHeader();
+renderModel();
 renderTable();
+renderDuplicates();
 renderAll();
 
 let resizeTimer;
