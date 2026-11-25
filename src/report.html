@@ -165,12 +165,10 @@ table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.model { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
-@media (max-width: 860px) { .model { grid-template-columns: minmax(0, 1fr); } }
 .model h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .schema {
-  margin: 0;
-  max-height: 520px;
+  margin: 8px 0 0;
+  max-height: 360px;
   overflow: auto;
   padding: 12px;
   background: var(--page);
@@ -179,14 +177,36 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
   font: 12px/1.45 var(--mono);
   white-space: pre;
 }
-#leaves td { white-space: nowrap; }
-#leaves td.leaf { font-family: var(--mono); font-size: 12px; white-space: normal; overflow-wrap: break-word; }
-#leaves td.type { color: var(--ink-2); white-space: normal; }
-#leaves tr.first td { border-top: 1px solid var(--axis); }
+.tree-wrap { overflow-x: auto; }
+.tree { min-width: 760px; font-variant-numeric: tabular-nums; }
+.tree .row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.3fr) minmax(0, 2.4fr) 64px 92px 150px;
+  gap: 12px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--grid);
+}
+.tree .head { color: var(--muted); font-size: 12px; font-weight: 500; }
+.tree .node > .row { cursor: default; }
+.tree .node.open > .row .toggle::before { content: "▾"; }
+.tree .node:not(.open) > .row .toggle::before { content: "▸"; }
+.tree .node:not(.open) > .kids { display: none; }
+.tree .toggle { display: inline-block; width: 14px; color: var(--muted); cursor: pointer; border: 0; background: none; padding: 0; font: inherit; }
+.tree .toggle.none { visibility: hidden; }
+.tree .name { font-family: var(--mono); font-size: 12px; overflow-wrap: break-word; }
+.tree .node > .row .name { font-weight: 600; }
+.tree .param .name { font-weight: 400; }
+.tree .desc { color: var(--ink); }
+.tree .desc .sub, .tree .muted { color: var(--muted); font-size: 12px; }
+.tree .param .desc { color: var(--ink-2); font-size: 13px; }
+.tree .num { text-align: right; }
+.tree .share { display: flex; align-items: center; gap: 6px; }
+.tree .share .track { flex: 1; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.tree .share .fill { display: block; height: 100%; border-radius: 4px; }
+.tree .share .value { width: 44px; text-align: right; font-size: 12px; }
 .measure { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
-.weight { display: inline-block; height: 6px; border-radius: 3px; background: var(--series-1); vertical-align: middle; margin-right: 6px; }
-.flag { color: var(--series-2); }
-#leaves .label { color: var(--muted); font-size: 12px; }
+.flag { color: var(--series-2); font-size: 12px; }
 </style>
 
 <main>
@@ -198,21 +218,15 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
 
   <section>
     <h2>Tested model</h2>
-    <p class="note">What the inputs are made of, and how sengi measures them. Every simple value, choice and collection length is a leaf; each leaf is compared on the parameters listed. A distance must reach its threshold to make two inputs different (above 1 it never decides alone); categories are covered pairwise. Weights come from AHP and sum to 1 per leaf.</p>
+    <p class="note">What the inputs are made of, and how sengi tells them apart.</p>
     <div class="model">
-      <div>
-        <h3>Input schema</h3>
+      <details open>
+        <summary>Input schema</summary>
         <pre class="schema" id="schema"></pre>
-      </div>
-      <div>
-        <h3>Leaves and their parameters</h3>
-        <div class="table-wrap">
-          <table id="leaves">
-            <thead><tr><th>Leaf</th><th>Type</th><th>Parameter</th><th>Weight</th><th>Threshold</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
+      </details>
+      <h3 style="margin-top: 16px">Parts of the input and how each is measured</h3>
+      <p class="note">Each part's share is how much of all the differences between the inputs comes from it, including everything below it. A part that varies by itself lists its parameters: blue are distances, which must reach their threshold to make two inputs different (above 1 they never decide alone); orange are categories, covered pairwise. Click ▾ to fold a part.</p>
+      <div class="tree-wrap"><div class="tree" id="tree"></div></div>
     </div>
   </section>
 
@@ -234,7 +248,7 @@ td code { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; over
 
   <section>
     <h2>What makes inputs different</h2>
-    <p class="note">Share of all differences between all pairs of inputs, broken down by input, then leaf, then parameter. A distance parameter counts its weight × distance; a category counts its weight whenever two inputs fall in different categories.</p>
+    <p class="note">Share of all differences between all pairs of inputs, following the structure of the input from the top row down to the parameters at the bottom of each column. A distance parameter counts its weight × distance; a category counts its weight whenever two inputs fall in different categories. Hover for details.</p>
     <div class="legend">
       <span><span class="swatch square" style="background: var(--series-1)"></span>Distance parameter</span>
       <span><span class="swatch square" style="background: var(--series-2)"></span>Category parameter</span>
@@ -445,73 +459,68 @@ function renderMap() {
 
 // ------------------------------------------------------------ breakdown (icicle)
 
-function buildTree() {
-  const root = { name: "all", share: 0, children: new Map() };
-  for (const c of DATA.contributions) {
-    root.share += c.share;
-    if (!root.children.has(c.input)) root.children.set(c.input, { name: c.input, share: 0, children: new Map() });
-    const input = root.children.get(c.input);
-    input.share += c.share;
-    if (!input.children.has(c.leaf)) input.children.set(c.leaf, { name: c.leaf, share: 0, children: new Map() });
-    const leaf = input.children.get(c.leaf);
-    leaf.share += c.share;
-    leaf.children.set(c.parameter + "/" + c.kind, { name: c.parameter, kind: c.kind, share: c.share, children: new Map() });
+// The model tree with each part's parameters as its last level.
+function breakdownTree() {
+  function convert(node, path) {
+    const fullPath = path.concat(node.name);
+    const children = node.children.map(child => convert(child, fullPath))
+      .concat(node.params.map(p => ({ name: p.name, kind: p.measure, about: p.about,
+        share: p.share, path: fullPath.concat(p.name), children: [] })));
+    return { name: node.name, share: node.share, path: fullPath, about: node.type, children };
   }
-  return root;
+  return convert(DATA.model.tree, []);
+}
+
+function treeDepth(node) {
+  return node.children.length === 0 ? 0 : 1 + Math.max(...node.children.map(treeDepth));
 }
 
 function renderBreakdown() {
   const host = document.getElementById("breakdown");
   host.innerHTML = "";
-  if (DATA.contributions.length === 0) {
+  const tree = breakdownTree();
+  if (!(tree.share > 0)) {
     host.innerHTML = `<p class="empty">No differences to break down.</p>`;
     return;
   }
   const width = 960;
-  const rowHeight = 34;
+  const rowHeight = 30;
   const gap = 2;
-  const labels = ["Input", "Leaf", "Parameter"];
-  const labelWidth = 76;
-  const height = 3 * rowHeight + 2 * gap;
+  const levels = treeDepth(tree);
+  const height = levels * (rowHeight + gap);
   const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, role: "img",
-    "aria-label": "Breakdown of differences by input, leaf and parameter" }, host);
-  const usable = width - labelWidth;
-  const tree = buildTree();
+    "aria-label": "Breakdown of differences through the parts of the input down to parameters" }, host);
 
-  labels.forEach((label, depth) => {
-    const text = el("text", { x: 0, y: depth * (rowHeight + gap) + rowHeight / 2 + 4 }, svg);
-    text.textContent = label;
-  });
-
-  function draw(node, depth, x, path) {
-    const children = [...node.children.values()].sort((a, b) => b.share - a.share);
+  function draw(node, depth, x) {
+    const children = node.children.filter(c => c.share > 0).sort((a, b) => b.share - a.share);
     let cursor = x;
     for (const child of children) {
-      const w = (child.share / tree.share) * usable;
+      const w = (child.share / tree.share) * width;
       const y = depth * (rowHeight + gap);
-      const isParameter = depth === 2;
+      const isParameter = child.kind !== undefined;
       const fill = isParameter
         ? (child.kind === "category" ? css("--series-2") : css("--series-1"))
         : css("--node");
-      const rect = el("rect", { x: labelWidth + cursor + gap / 2, y, width: Math.max(0, w - gap),
-        height: rowHeight, rx: 3, fill }, svg);
-      const fullPath = path.concat(isParameter ? `${child.name} (${child.kind})` : child.name);
-      const percent = (child.share / tree.share * 100).toFixed(1) + "%";
-      if (w > 56) {
-        const label = el("text", { x: labelWidth + cursor + 8, y: y + rowHeight / 2 + 4 }, svg);
+      // Parameters fill the rest of their column, so every column ends in its parameters.
+      const h = isParameter ? height - y : rowHeight;
+      const rect = el("rect", { x: cursor + gap / 2, y, width: Math.max(0, w - gap),
+        height: h, rx: 3, fill }, svg);
+      if (w > 40) {
+        const label = el("text", { x: cursor + 7, y: y + rowHeight / 2 + 4 }, svg);
         label.style.fill = isParameter ? "#ffffff" : css("--node-ink");
-        const maxChars = Math.floor((w - 16) / 6.5);
-        const name = child.name.length > maxChars ? child.name.slice(0, maxChars - 1) + "…" : child.name;
-        label.textContent = name;
+        const maxChars = Math.floor((w - 14) / 6.5);
+        label.textContent = child.name.length > maxChars ? child.name.slice(0, maxChars - 1) + "…" : child.name;
       }
+      const detail = isParameter ? `${child.kind}: ${child.about}` : child.about;
       rect.addEventListener("pointermove", event =>
-        showTooltip(event, `<div><b>${escapeHtml(fullPath.join(" › "))}</b></div><div>${percent} of all differences</div>`));
+        showTooltip(event, `<div><b>${escapeHtml(child.path.join(" › "))}</b></div>` +
+          `<div class="label">${escapeHtml(detail)}</div><div>${percent(child.share / tree.share)} of all differences</div>`));
       rect.addEventListener("pointerleave", hideTooltip);
-      if (!isParameter) draw(child, depth + 1, cursor, fullPath);
+      if (!isParameter) draw(child, depth + 1, cursor);
       cursor += w;
     }
   }
-  draw(tree, 0, 0, []);
+  draw(tree, 0, 0);
 }
 
 // ------------------------------------------------------------ growth
@@ -616,33 +625,57 @@ function ordered(value, inProperties) {
   return result;
 }
 
-function breakablePath(path) {
-  return escapeHtml(path).replace(/([.\]])/g, "$1<wbr>");
+function percent(share) {
+  return (share * 100).toFixed(share > 0 && share < 0.001 ? 2 : 1) + "%";
+}
+
+function shareCell(share, color) {
+  return `<span class="share"><span class="track"><span class="fill" style="width: ${Math.min(100, share * 100)}%; background: var(${color})"></span></span>` +
+    `<span class="value">${percent(share)}</span></span>`;
 }
 
 function renderModel() {
   document.getElementById("schema").textContent = JSON.stringify(ordered(DATA.model.schema, false), null, 2);
-  const rows = [];
-  for (const leaf of DATA.model.leaves) {
-    const span = Math.max(1, leaf.params.length);
-    const head = `<td class="leaf" rowspan="${span}">${breakablePath(leaf.path)}</td>` +
-      `<td class="type" rowspan="${span}">${escapeHtml(leaf.type)}</td>`;
-    if (leaf.params.length === 0) {
-      rows.push(`<tr class="first">${head}<td colspan="3" class="flag">${escapeHtml(leaf.note || "")}</td></tr>`);
-      continue;
-    }
-    leaf.params.forEach((p, i) => {
-      const color = p.measure === "distance" ? "--series-1" : "--series-2";
-      const threshold = p.measure !== "distance" ? "pairwise coverage"
-        : p.threshold > 1 ? `${p.threshold.toFixed(2)} (never alone)` : p.threshold.toFixed(2);
-      rows.push(`<tr${i === 0 ? ' class="first"' : ""}>${i === 0 ? head : ""}` +
-        `<td><span class="measure" style="background: var(${color})"></span>${escapeHtml(p.name)} ` +
-        `<span class="label">${p.measure}</span></td>` +
-        `<td><span class="weight" style="width: ${Math.round(p.weight * 60)}px; background: var(${color})"></span>${p.weight.toFixed(2)}</td>` +
-        `<td>${threshold}</td></tr>`);
-    });
+  const host = document.getElementById("tree");
+  host.innerHTML = `<div class="row head"><span>Part</span><span>What it is</span>` +
+    `<span class="num">Weight</span><span class="num">Threshold</span><span>Share of differences</span></div>`;
+  host.appendChild(modelNode(DATA.model.tree, 0));
+}
+
+function modelNode(node, depth) {
+  const wrap = document.createElement("div");
+  wrap.className = "node open";
+  const hasKids = node.params.length > 0 || node.children.length > 0;
+  const indent = `padding-left: ${depth * 18}px`;
+  const varies = node.varies ? `<div class="sub">varies by ${escapeHtml(node.varies)}</div>` : "";
+  const note = node.note ? `<div class="flag">${escapeHtml(node.note)}</div>` : "";
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML =
+    `<span class="name" style="${indent}"><button class="toggle${hasKids ? "" : " none"}" aria-label="Fold"></button>${escapeHtml(node.name)}</span>` +
+    `<span class="desc">${escapeHtml(node.type)} <span class="muted">· ${escapeHtml(node.what)}</span>${varies}${note}</span>` +
+    `<span></span><span></span>${shareCell(node.share, "--axis")}`;
+  wrap.appendChild(row);
+  row.querySelector(".toggle").addEventListener("click", () => wrap.classList.toggle("open"));
+
+  const kids = document.createElement("div");
+  kids.className = "kids";
+  const paramIndent = `padding-left: ${(depth + 1) * 18 + 14}px`;
+  for (const p of node.params) {
+    const color = p.measure === "distance" ? "--series-1" : "--series-2";
+    const threshold = p.measure !== "distance" ? `<span class="muted">pairwise</span>`
+      : p.threshold > 1 ? `${p.threshold.toFixed(2)} <span class="muted">never alone</span>` : p.threshold.toFixed(2);
+    const line = document.createElement("div");
+    line.className = "row param";
+    line.innerHTML =
+      `<span class="name" style="${paramIndent}"><span class="measure" style="background: var(${color})"></span>${escapeHtml(p.name)}</span>` +
+      `<span class="desc">${escapeHtml(p.about)} <span class="muted">· ${p.measure}</span></span>` +
+      `<span class="num">${p.weight.toFixed(2)}</span><span class="num">${threshold}</span>${shareCell(p.share, color)}`;
+    kids.appendChild(line);
   }
-  document.querySelector("#leaves tbody").innerHTML = rows.join("");
+  for (const child of node.children) kids.appendChild(modelNode(child, depth + 1));
+  wrap.appendChild(kids);
+  return wrap;
 }
 
 function renderDuplicates() {

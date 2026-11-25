@@ -3,19 +3,19 @@
 //!
 //! The report has these views:
 //!
-//! - **Tested model**: the inputs' JSON Schema, and every leaf with the
-//!   parameters derived from it (distance or category, AHP weight,
-//!   threshold at θ).
-//!
+//! - **Tested model**: the inputs' JSON Schema, and the parts of the input
+//!   as a foldable tree ([`model`]): what each part is, the parameters that
+//!   measure it (distance or category, AHP weight, threshold at θ) and its
+//!   share of all differences, summed up the tree.
 //! - **Distance heatmap**: every pair of inputs, coloured by their weighted
 //!   mean distance. Light cells off the diagonal are near-duplicates.
 //! - **Corpus map**: the inputs laid out in 2-D so that the distance between
 //!   dots approximates the distance between inputs (classical
 //!   multidimensional scaling). An even cloud means a well-spread corpus.
-//! - **What makes inputs different**: an icicle chart of input → leaf →
-//!   parameter, each block as wide as its share of all differences between
-//!   all pairs (AHP weight × distance, categories counting 1 when they
-//!   differ).
+//! - **What makes inputs different**: the same tree as an icicle chart, from
+//!   the whole input down to parameters, each block as wide as its share of
+//!   all differences between all pairs (AHP weight × distance; a category
+//!   counts its weight when two inputs differ on it).
 //! - **Growth** (generated corpora only): corpus size against attempts; a
 //!   flat tail means saturation.
 //! - **Near-duplicates**: pairs that exercise the same thing (see
@@ -27,7 +27,7 @@
 //! The page is a fixed template (`report.html`) plus one JSON data block made
 //! by [`report_data`]. It knows nothing about Rust: a future Python or
 //! JavaScript front end that produces the same data (inputs as JSON, a
-//! distance matrix, coordinates, contributions, acceptance attempts) gets the
+//! distance matrix, coordinates, the model tree, acceptance attempts) gets the
 //! same report.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,9 +45,9 @@ use crate::distance::weighted_mean;
 use crate::registry::Registry;
 use crate::save::input_to_json;
 use crate::schema::schema_of;
-use crate::shape::{Shape, Simple};
+use crate::shape::{Len, Shape, Simple};
 use crate::stats::Stats;
-use crate::value::{Input, Kind};
+use crate::value::{Family, Input, Kind};
 
 const TEMPLATE: &str = include_str!("report.html");
 
@@ -174,162 +174,302 @@ pub fn report_data(
         "facts": facts,
         "inputs": entries,
         "distances": distances,
-        "contributions": contributions(inputs, registry),
         "near_duplicates": near_duplicates_json(&duplicates),
-        "model": model(shape, registry, theta),
+        "model": model(shape, inputs, registry, theta),
     })
 }
 
-/// What is being tested: the inputs' JSON Schema, and every leaf of the
-/// shape with the parameters that measure it — distance or category, AHP
-/// weight, and threshold at θ (distances only).
-pub fn model(shape: &Shape, registry: &Registry, theta: f64) -> Value {
-    let mut leaves = Vec::new();
-    collect_leaves(shape, "", registry, theta, &mut leaves);
-    json!({ "schema": schema_of(shape), "leaves": leaves })
+/// What is being tested: the inputs' JSON Schema, and the shape as a tree.
+///
+/// Every node of the tree is a part of the input — the whole input, a field,
+/// an enum, a list, a list's items, a simple value — with a description of
+/// what it is. A node that varies on its own (a simple value, which variant
+/// or option is chosen, how many items a list has) lists the parameters that
+/// measure it: distance or category, AHP weight, threshold at θ (distances
+/// only) and what it captures.
+///
+/// `share` is the node's part of all the differences between all pairs of
+/// `inputs`, summed over everything below it: the root's share is 1 (or 0
+/// with fewer than two inputs), and a node's share is its own parameters'
+/// shares plus its children's. A distance parameter contributes
+/// `weight × distance` for each pair; a category contributes `weight` when
+/// the two categories differ. List items are merged (`xs[3]` counts as
+/// `xs[]`).
+pub fn model(shape: &Shape, inputs: &[Input], registry: &Registry, theta: f64) -> Value {
+    let builder = ModelBuilder {
+        registry,
+        theta,
+        shares: leaf_shares(inputs, registry),
+    };
+    json!({
+        "schema": schema_of(shape),
+        "tree": builder.node("input", "", shape, "the whole input"),
+    })
 }
 
-fn collect_leaves(
-    shape: &Shape,
-    path: &str,
-    registry: &Registry,
+struct ModelBuilder<'a> {
+    registry: &'a Registry,
     theta: f64,
-    out: &mut Vec<Value>,
-) {
-    let shown = if path.is_empty() { "(input)" } else { path };
-    let mut leaf = |at: &str, ty: String, kind: Option<Kind>, note: Option<String>| {
+    /// (leaf path without indices, parameter) -> share of all differences.
+    shares: BTreeMap<(String, String), f64>,
+}
+
+impl ModelBuilder<'_> {
+    /// One node: `name` as shown, `path` as in the inputs (without list
+    /// indices), `what` says what this part is to its parent.
+    fn node(&self, name: &str, path: &str, shape: &Shape, what: &str) -> Value {
+        // The leaf this node varies on by itself, if any: (what varies, kind, leaf path).
+        let own: Option<(&str, Kind, String)> = match shape {
+            Shape::Simple(simple) => Some(("the value", Kind::Simple(*simple), path.to_string())),
+            Shape::Enum(_) => Some(("which variant is chosen", Kind::Choice, path.to_string())),
+            Shape::Union(_) => Some((
+                "which alternative is chosen",
+                Kind::Choice,
+                path.to_string(),
+            )),
+            Shape::Literal(values) if values.len() > 1 => {
+                Some(("which value is chosen", Kind::Choice, path.to_string()))
+            }
+            Shape::Option(_) => Some(("whether it is null", Kind::Choice, path.to_string())),
+            Shape::Optional(_) => Some(("whether it is there", Kind::Choice, path.to_string())),
+            Shape::List(..) => Some(("how many items", Kind::Length, child(path, "len"))),
+            Shape::Map(..) => Some(("how many entries", Kind::Length, child(path, "len"))),
+            Shape::Custom(name) => {
+                Some(("the value", Kind::Custom(name.clone()), path.to_string()))
+            }
+            _ => None,
+        };
+
         let mut params = Vec::new();
-        if let Some(kind) = &kind {
-            for p in registry.distances(kind) {
+        let mut share = 0.0;
+        if let Some((_, kind, leaf)) = &own {
+            for p in self.registry.distances(kind) {
+                let s = self.share(leaf, p.name);
+                share += s;
                 params.push(json!({
                     "name": p.name,
                     "measure": "distance",
+                    "about": about(kind, p.name),
                     "weight": p.weight,
-                    "threshold": theta * p.threshold_scale,
+                    "threshold": self.theta * p.threshold_scale,
+                    "share": s,
                 }));
             }
-            for p in registry.categories(kind) {
-                params.push(json!({ "name": p.name, "measure": "category", "weight": p.weight }));
+            for p in self.registry.categories(kind) {
+                let s = self.share(leaf, p.name);
+                share += s;
+                params.push(json!({
+                    "name": p.name,
+                    "measure": "category",
+                    "about": about(kind, p.name),
+                    "weight": p.weight,
+                    "share": s,
+                }));
             }
         }
-        out.push(json!({ "path": at, "type": ty, "params": params, "note": note }));
-    };
-    match shape {
-        Shape::Simple(simple) => leaf(
-            shown,
-            describe_simple(simple),
-            Some(Kind::Simple(*simple)),
-            None,
-        ),
-        Shape::Fields(fields) => {
-            for (name, field) in fields {
-                collect_leaves(field, &child(path, name), registry, theta, out);
+
+        let mut children = Vec::new();
+        match shape {
+            Shape::Fields(fields) => {
+                for (field, field_shape) in fields {
+                    let what = if path.is_empty() && !is_tuple(fields) {
+                        "a parameter or property"
+                    } else {
+                        "a field"
+                    };
+                    children.push(self.node(field, &child(path, field), field_shape, what));
+                }
             }
+            Shape::Enum(variants) => {
+                for (variant, fields) in variants.iter().filter(|(_, fields)| !fields.is_empty()) {
+                    let variant_path = child(path, variant);
+                    let inner = Shape::Fields(fields.clone());
+                    let what = format!("the fields of `{variant}`, when chosen");
+                    children.push(self.node(variant, &variant_path, &inner, &what));
+                }
+            }
+            Shape::Union(members) => {
+                for (label, member) in members {
+                    if matches!(member, Shape::Literal(values) if values.len() < 2) {
+                        continue; // A constant alternative has nothing below it.
+                    }
+                    let what = format!("alternative `{label}`, when chosen");
+                    children.push(self.node(label, &child(path, label), member, &what));
+                }
+            }
+            Shape::Option(inner) | Shape::Optional(inner) => {
+                let inner_path = child(path, "Some");
+                children.push(self.node("Some", &inner_path, inner, "the value, when there"));
+            }
+            Shape::List(element, _) | Shape::Array(element, _) => {
+                children.push(self.node("[]", &format!("{path}[]"), element, "each item"));
+            }
+            Shape::Map(key, value, _) => {
+                children.push(self.node("key", &format!("{path}[].key"), key, "each key"));
+                children.push(self.node("value", &format!("{path}[].value"), value, "each value"));
+            }
+            _ => {}
         }
-        Shape::Enum(variants) => {
-            let names: Vec<&str> = variants.iter().map(|(name, _)| name.as_str()).collect();
-            leaf(
-                shown,
-                format!("variant: {}", names.join(" | ")),
-                Some(Kind::Choice),
-                None,
-            );
-            for (variant, fields) in variants {
-                for (name, field) in fields {
-                    let at = child(&child(path, variant), name);
-                    collect_leaves(field, &at, registry, theta, out);
+        for node in &children {
+            share += node["share"].as_f64().unwrap_or(0.0);
+        }
+
+        let note = match shape {
+            Shape::Ignored => Some("not generated: a generic type"),
+            Shape::Unsupported(_) => Some("not generated or measured: needs an override"),
+            Shape::Literal(values) if values.len() < 2 => Some("a constant: never varies"),
+            _ => None,
+        };
+        json!({
+            "name": name,
+            "path": path,
+            "type": describe(shape),
+            "what": what,
+            "varies": own.as_ref().map(|(varies, _, _)| *varies),
+            "params": params,
+            "children": children,
+            "share": share,
+            "note": note,
+        })
+    }
+
+    fn share(&self, leaf: &str, param: &str) -> f64 {
+        let key = (leaf.to_string(), param.to_string());
+        self.shares.get(&key).copied().unwrap_or(0.0)
+    }
+}
+
+/// How much each (leaf, parameter) contributes to the differences between
+/// all pairs of inputs, as shares that sum to 1 (empty with no differences).
+fn leaf_shares(inputs: &[Input], registry: &Registry) -> BTreeMap<(String, String), f64> {
+    let mut totals: BTreeMap<(String, String), f64> = BTreeMap::new();
+    for i in 0..inputs.len() {
+        for j in (i + 1)..inputs.len() {
+            for (path, leaf_a) in &inputs[i] {
+                let Some(leaf_b) = inputs[j].get(path) else {
+                    continue;
+                };
+                let leaf = without_indices(path);
+                for param in registry.distances(&leaf_a.kind) {
+                    let distance = (param.distance)(&leaf_a.kind, &leaf_a.value, &leaf_b.value);
+                    *totals
+                        .entry((leaf.clone(), param.name.to_string()))
+                        .or_insert(0.0) += param.weight * distance;
+                }
+                for param in registry.categories(&leaf_a.kind) {
+                    let a = (param.category)(&leaf_a.kind, &leaf_a.value);
+                    let b = (param.category)(&leaf_b.kind, &leaf_b.value);
+                    if a != b {
+                        *totals
+                            .entry((leaf.clone(), param.name.to_string()))
+                            .or_insert(0.0) += param.weight;
+                    }
                 }
             }
         }
+    }
+    let grand_total: f64 = totals.values().sum();
+    if grand_total > 0.0 {
+        for total in totals.values_mut() {
+            *total /= grand_total;
+        }
+    }
+    totals
+}
+
+/// What a built-in parameter captures, in a few words.
+fn about(kind: &Kind, param: &str) -> &'static str {
+    match (kind.family(), param) {
+        (Family::UInt | Family::Int, "magnitude") => {
+            "how far apart, on a log scale: 1 vs 2 counts as much as 1000 vs 2000"
+        }
+        (Family::UInt | Family::Int, "bits") => "how many bits differ",
+        (Family::UInt | Family::Int, "boundary") => {
+            "which edge case: zero, one, min, max, one step in from either end, or other"
+        }
+        (Family::Int, "sign") => "negative, zero or positive",
+        (Family::Float, "magnitude") => {
+            "how far apart: by exponent, or relative to the range when it is limited"
+        }
+        (Family::Float, "class") => "NaN, infinite, zero, subnormal or normal",
+        (Family::Float, "sign") => "negative or positive",
+        (Family::Char, "class") => {
+            "lowercase, uppercase, digit, punctuation, whitespace, control or non-ASCII"
+        }
+        (Family::Char, "codepoint") => "how far apart the code points are",
+        (Family::Text, "length") => "difference in length, relative to the longer string",
+        (Family::Text, "bytes") => "edit distance between the bytes, relative to the longer string",
+        (Family::Text, "classes") => {
+            "which kinds of characters appear: letters, digits, punctuation, ..."
+        }
+        (Family::Bool, "value") => "true or false",
+        (Family::Choice, "variant") => "which one was chosen",
+        (Family::Length, "length") => "difference in count, relative to the larger",
+        (Family::Custom(_), _) => "defined by the override",
+        _ => "",
+    }
+}
+
+/// What a part of the input is, e.g. `integer 0..=150` or `enum: Off | Fast`.
+fn describe(shape: &Shape) -> String {
+    match shape {
+        Shape::Simple(simple) => describe_simple(simple),
+        Shape::Fields(fields) if fields.is_empty() => "nothing (no fields)".to_string(),
+        Shape::Fields(fields) if is_tuple(fields) && fields.len() == 1 => {
+            format!("wrapper around {}", describe(&fields[0].1))
+        }
+        Shape::Fields(fields) if is_tuple(fields) => format!("tuple of {}", fields.len()),
+        Shape::Fields(fields) => {
+            let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+            format!("{{ {} }}", names.join(", "))
+        }
+        Shape::Enum(variants) => {
+            let names: Vec<&str> = variants.iter().map(|(name, _)| name.as_str()).collect();
+            format!("enum: {}", names.join(" | "))
+        }
         Shape::Union(members) => {
             let labels: Vec<&str> = members.iter().map(|(label, _)| label.as_str()).collect();
-            leaf(
-                shown,
-                format!("one of: {}", labels.join(" | ")),
-                Some(Kind::Choice),
-                None,
-            );
-            for (label, member) in members {
-                collect_leaves(member, &child(path, label), registry, theta, out);
-            }
+            format!("one of: {}", labels.join(" | "))
         }
         Shape::Literal(values) => {
-            let shown_values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-            if values.len() > 1 {
-                leaf(
-                    shown,
-                    format!("one of: {}", shown_values.join(" | ")),
-                    Some(Kind::Choice),
-                    None,
-                );
+            let shown: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+            if values.len() == 1 {
+                format!("constant {}", shown[0])
             } else {
-                let note = Some("a constant: nothing to vary".to_string());
-                leaf(
-                    shown,
-                    format!("constant {}", shown_values.join("")),
-                    None,
-                    note,
-                );
+                format!("one of: {}", shown.join(" | "))
             }
         }
-        Shape::Option(inner) | Shape::Optional(inner) => {
-            let ty = if matches!(shape, Shape::Option(_)) {
-                "null or a value"
-            } else {
-                "present or left out"
-            };
-            leaf(shown, ty.to_string(), Some(Kind::Choice), None);
-            collect_leaves(inner, &child(path, "Some"), registry, theta, out);
-        }
-        Shape::List(element, len) => {
-            let range = match len.max {
-                Some(max) => format!("{}..={max} items", len.min),
-                None => format!("{} or more items", len.min),
-            };
-            leaf(
-                &child(path, "len"),
-                format!("list length, {range}"),
-                Some(Kind::Length),
-                None,
-            );
-            collect_leaves(element, &format!("{path}[]"), registry, theta, out);
-        }
-        Shape::Array(element, _) => {
-            collect_leaves(element, &format!("{path}[]"), registry, theta, out)
-        }
-        Shape::Map(key, value, len) => {
-            let range = match len.max {
-                Some(max) => format!("{}..={max} entries", len.min),
-                None => format!("{} or more entries", len.min),
-            };
-            leaf(
-                &child(path, "len"),
-                format!("map size, {range}"),
-                Some(Kind::Length),
-                None,
-            );
-            collect_leaves(key, &format!("{path}[].key"), registry, theta, out);
-            collect_leaves(value, &format!("{path}[].value"), registry, theta, out);
-        }
-        Shape::Custom(name) => leaf(
-            shown,
-            format!("override `{name}`"),
-            Some(Kind::Custom(name.clone())),
-            None,
+        Shape::Option(inner) => format!("{} or null", describe(inner)),
+        Shape::Optional(inner) => format!("{}, may be left out", describe(inner)),
+        Shape::List(element, len) => format!(
+            "list of {}, {}",
+            describe(element),
+            describe_len(len, "items")
         ),
-        Shape::Ignored => leaf(
-            shown,
-            "generic".to_string(),
-            None,
-            Some("not generated".to_string()),
+        Shape::Array(element, len) => format!("array of {len} × {}", describe(element)),
+        Shape::Map(_, value, len) => format!(
+            "map to {}, {}",
+            describe(value),
+            describe_len(len, "entries")
         ),
-        Shape::Unsupported(why) => leaf(
-            shown,
-            why.clone(),
-            None,
-            Some("not generated: needs an override".to_string()),
-        ),
+        Shape::Custom(name) => format!("override `{name}`"),
+        Shape::Ignored => "generic".to_string(),
+        Shape::Unsupported(why) => why.clone(),
     }
+}
+
+fn describe_len(len: &Len, unit: &str) -> String {
+    match len.max {
+        Some(max) => format!("{}..={max} {unit}", len.min),
+        None if len.min == 0 => format!("any number of {unit}"),
+        None => format!("{} or more {unit}", len.min),
+    }
+}
+
+fn is_tuple(fields: &[(String, Shape)]) -> bool {
+    fields
+        .iter()
+        .all(|(name, _)| name.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// `u8`, `integer 1..=10`, `string of 1..=40 characters`, ...
@@ -506,75 +646,6 @@ fn largest_eigenvector(matrix: &[Vec<f64>]) -> (f64, Vec<f64>) {
     (value, vector)
 }
 
-/// How much each (input, leaf, parameter) contributes to the differences
-/// between all pairs of inputs, as shares that sum to 1.
-///
-/// A distance parameter contributes `weight × distance`; a category
-/// parameter contributes `weight` when the two categories differ. List
-/// elements are merged (`xs[3]` counts as `xs[]`).
-fn contributions(inputs: &[Input], registry: &Registry) -> Vec<Value> {
-    // (input, leaf, parameter, "distance" | "category") -> total
-    let mut totals: BTreeMap<(String, String, String, &str), f64> = BTreeMap::new();
-
-    for i in 0..inputs.len() {
-        for j in (i + 1)..inputs.len() {
-            for (path, leaf_a) in &inputs[i] {
-                let Some(leaf_b) = inputs[j].get(path) else {
-                    continue;
-                };
-                let leaf = without_indices(path);
-                let input = top_level_name(&leaf);
-
-                for param in registry.distances(&leaf_a.kind) {
-                    let distance = (param.distance)(&leaf_a.kind, &leaf_a.value, &leaf_b.value);
-                    let key = (
-                        input.clone(),
-                        leaf.clone(),
-                        param.name.to_string(),
-                        "distance",
-                    );
-                    *totals.entry(key).or_insert(0.0) += param.weight * distance;
-                }
-                for param in registry.categories(&leaf_a.kind) {
-                    let a = (param.category)(&leaf_a.kind, &leaf_a.value);
-                    let b = (param.category)(&leaf_b.kind, &leaf_b.value);
-                    if a != b {
-                        let key = (
-                            input.clone(),
-                            leaf.clone(),
-                            param.name.to_string(),
-                            "category",
-                        );
-                        *totals.entry(key).or_insert(0.0) += param.weight;
-                    }
-                }
-            }
-        }
-    }
-
-    let grand_total: f64 = totals.values().sum();
-    let mut result = Vec::new();
-    for ((input, leaf, parameter, kind), total) in totals {
-        if total <= 0.0 {
-            continue;
-        }
-        result.push(json!({
-            "input": input,
-            "leaf": leaf,
-            "parameter": parameter,
-            "kind": kind,
-            "share": total / grand_total,
-        }));
-    }
-    result
-}
-
-/// `cfg.mode.Fast.0` -> `cfg`, `xs[].key` -> `xs`.
-fn top_level_name(path: &str) -> String {
-    let end = path.find(['.', '[']).unwrap_or(path.len());
-    path[..end].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,14 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_names() {
-        assert_eq!(top_level_name("cfg.mode.Fast.0"), "cfg");
-        assert_eq!(top_level_name("xs[].key"), "xs");
-        assert_eq!(top_level_name("left"), "left");
-    }
-
-    #[test]
-    fn the_model_lists_every_leaf_with_its_parameters() {
+    fn the_model_is_a_tree_whose_shares_add_up() {
         use crate::overrides::Overrides;
         let schema = json!({
             "type": "object",
@@ -625,37 +689,51 @@ mod tests {
         });
         let shape = crate::schema::shape_from_schema(&schema, &Overrides::new());
         let registry = Registry::new().unwrap();
-        let model = model(&shape, &registry, 0.5);
+        let values = [
+            json!({ "age": 0, "tags": [], "email": "a@b.c" }),
+            json!({ "age": 150, "tags": ["x", "a long tag"], "email": "a@b.c" }),
+            json!({ "age": 40, "tags": ["y"], "email": "a@b.c" }),
+        ];
+        let inputs = crate::analysis::read_inputs(&shape, &values).unwrap();
+        let model = model(&shape, &inputs, &registry, 0.5);
+        let tree = &model["tree"];
 
-        let rows: Vec<(String, String)> = model["leaves"]
+        let names: Vec<&str> = tree["children"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|leaf| {
-                (
-                    leaf["path"].as_str().unwrap().into(),
-                    leaf["type"].as_str().unwrap().into(),
-                )
-            })
+            .map(|node| node["name"].as_str().unwrap())
             .collect();
+        assert_eq!(names, ["age", "email", "tags"]);
+
+        // `tags` varies by its length, and its items sit below it.
+        let tags = &tree["children"][2];
+        assert_eq!(tags["varies"], "how many items");
+        assert_eq!(tags["params"][0]["name"], "length");
+        assert_eq!(tags["children"][0]["path"], "tags[]");
+        assert_eq!(tags["children"][0]["type"], "string");
+
+        // Every node's share is its own parameters' plus its children's.
+        fn check(node: &Value) -> f64 {
+            let own: f64 = node["params"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["share"].as_f64().unwrap())
+                .sum();
+            let below: f64 = node["children"].as_array().unwrap().iter().map(check).sum();
+            assert!((node["share"].as_f64().unwrap() - (own + below)).abs() < 1e-9);
+            own + below
+        }
+        assert!((check(tree) - 1.0).abs() < 1e-9);
+
+        // What can't be measured is said so, and contributes nothing.
+        let email = &tree["children"][1];
         assert_eq!(
-            rows,
-            [
-                ("age".into(), "integer 0..=150".into()),
-                ("email".into(), "a string with format `email`".into()),
-                ("tags.len".into(), "list length, 0 or more items".into()),
-                ("tags[]".into(), "string".into()),
-            ]
+            email["note"],
+            "not generated or measured: needs an override"
         );
-        let age: Vec<&str> = model["leaves"][0]["params"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| p["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(age, ["magnitude", "bits", "boundary"]);
-        assert_eq!(model["leaves"][0]["params"][0]["threshold"], 0.5);
-        assert!(model["leaves"][1]["params"].as_array().unwrap().is_empty());
+        assert_eq!(email["share"], 0.0);
         assert_eq!(model["schema"]["properties"]["age"]["maximum"], 150);
     }
 
